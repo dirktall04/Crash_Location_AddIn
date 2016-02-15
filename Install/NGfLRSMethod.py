@@ -96,14 +96,14 @@ charsubs = {'B': '1', 'F': '1', 'P': '1', 'V': '1',
 ## //TODO: Add a function decorator that takes the rest of the functions and
 ## places lyr = cps.lyr
 ## Alias = cps.Alias
-## DOTRoads = cps.DOTRoads
+## DOTRoadsGDB = cps.DOTRoadsGDB
 ## gdb = cps.gdbPath
 ## in them.
 
 
 def InitalizeCurrentPathSettings():
     gdb = r'C:\GIS\Geodatabases\Region1_BA_Final.gdb'
-    DOTRoads = r"\\gisdata\arcgis\GISdata\DASC\NG911\KDOTReview\KDOT_Roads.gdb"
+    DOTRoadsGDB = r"C:\GIS\Geodatabases\KDOT_Roads.gdb"
     lyr = "RoadCenterline"
     Alias = "RoadAlias"
     
@@ -118,7 +118,7 @@ def InitalizeCurrentPathSettings():
         def __init__(self):
             self.gdbPath = gdb
             self.addressPointsPath = ""
-            self.DOTRoads = DOTRoads
+            self.DOTRoadsGDB = DOTRoadsGDB
             self.ordinalEndings = ordinalNumberEndings
             self.soundexExclusions = soundexNameExclusions
             self.lyr = lyr
@@ -135,11 +135,20 @@ def InitalizeCurrentPathSettings():
 def UpdateOptionsWithParameters(optionsObject):
     try:
         option0 = GetParameterAsText(0)
+        option1 = GetParameterAsText(1)
+        
     except:
         pass
     
-    if (option0 is not None and option0 != ""): # Output location after offset (accidentDataWithOffsetOutput)
+    if (option0 is not None and option0 != ""):
         optionsObject.gdbPath = option0
+        AddMessage("Using " + str(option0))
+    else:
+        pass
+    
+    if (option1 is not None and option1 != ""):
+        optionsObject.DOTRoadsGDB = option1
+        AddMessage("and " + str(option1))
     else:
         pass
     
@@ -329,24 +338,24 @@ Failed to execute (AddRuleToTopology)
 
 
 def ConflateKDOTrestart(cps):
-    DOTRoads = cps.DOTRoads
+    DOTRoadsGDB = cps.DOTRoadsGDB
     gdb = cps.gdbPath
 
     """Conflation restart for selecting KDOT roads to conflate to the NG911 Network"""
-    MakeFeatureLayer_management(DOTRoads+"\\KDOT_HPMS_2014","KDOT_Roads","#","#","#")
+    MakeFeatureLayer_management(DOTRoadsGDB+"\\KDOT_HPMS_2014","KDOT_Roads","#","#","#")
     MakeFeatureLayer_management(gdb+"\\RoadCenterline","RoadCenterline","#","#","#")
     SelectLayerByLocation_management("KDOT_Roads","INTERSECT","RoadCenterline","60 Feet","NEW_SELECTION")
     FeatureClassToFeatureClass_conversion("KDOT_Roads",gdb+"\\NG911","KDOT_Roads_Review","#","#","#")
 
 
 def ConflateKDOT(cps):
-    DOTRoads = cps.DOTRoads
+    DOTRoadsGDB = cps.DOTRoadsGDB
     gdb = cps.gdbPath
 
     """detects road centerline changes and transfers the HPMS key field from the KDOT roads via ESRI conflation tools"""
     AddMessage("Detecting road centerline changes.")
     spatialtolerance = "19 feet"
-    MakeFeatureLayer_management(DOTRoads+"\\KDOT_HPMS_2014","KDOT_Roads","#","#","#")
+    MakeFeatureLayer_management(DOTRoadsGDB+"\\KDOT_HPMS_2014","KDOT_Roads","#","#","#")
     MakeFeatureLayer_management(gdb+"\\RoadCenterline","RoadCenterline","#","#","#")  #this may already exist so check, and use FD
     if Exists(gdb+"\\NG911\\KDOT_Roads_Review"):
         print "selection of KDOT roads for conflation already exists"
@@ -393,7 +402,7 @@ def addAdminFields(cps):
 
 def CalcAdminFields(cps):
     lyr = cps.lyr
-    DOTRoads = cps.DOTRoads
+    DOTRoadsGDB = cps.DOTRoadsGDB
     env.workspace = cps.gdbPath
     
     """Populate Admin Fields with Default or Derived values"""
@@ -409,11 +418,11 @@ def CalcAdminFields(cps):
     CalcField(lyr,"KDOT_CITY_R","999","PYTHON_9.3","#")
     CalcField(lyr,"TDirCode","0","PYTHON_9.3","#")
     CalcField(lyr,"SHAPE_MILES","!Shape_Length!/5280.010560021","PYTHON_9.3","#")  #There are slightly more than 5280 miles per US Survey foot -- Reverse mile & survey foot
-    TableView(DOTRoads+"\\NG911_RdDir", "NG911_RdDir")
+    TableView(DOTRoadsGDB+"\\NG911_RdDir", "NG911_RdDir")
     JoinTbl(lyr,"PRD","NG911_RdDir", "RoadDir", "KEEP_COMMON")
     CalcField(lyr,"PreCode","!NG911_RdDir.RdDirCode!","PYTHON_9.3","#")
     removeJoin(lyr)
-    TableView(DOTRoads+"\\NG911_RdTypes", "NG911_RdTypes")
+    TableView(DOTRoadsGDB+"\\NG911_RdTypes", "NG911_RdTypes")
     CalcField(lyr,"SuffCode","0","PYTHON_9.3","#")
     JoinTbl(lyr,"STS","NG911_RdTypes", "RoadTypes", "KEEP_COMMON")
     CalcField(lyr,"SuffCode","!NG911_RdTypes.LRS_CODE_TXT!","PYTHON_9.3","#")
@@ -422,11 +431,11 @@ def CalcAdminFields(cps):
 
 def CountyCode(cps):
     lyr = cps.lyr
-    DOTRoads = cps.DOTRoads
+    DOTRoadsGDB = cps.DOTRoadsGDB
 
     """Codify the County number for LRS (based on right side of street based on addressing direction, calculated for LEFT and RIGHT from NG911)"""
     AddMessage("Calculating County Codes.")
-    TableView(DOTRoads+"\\NG911_County", "NG911_County")
+    TableView(DOTRoadsGDB+"\\NG911_County", "NG911_County")
     JoinTbl(lyr,"COUNTY_L","NG911_County", "CountyName", "KEEP_COMMON")
     CalcField(lyr,"KDOT_COUNTY_L","!NG911_County.CountyNumber!","PYTHON_9.3","#")
     removeJoin(lyr)
@@ -437,11 +446,11 @@ def CountyCode(cps):
 
 def CityCodes(cps):
     lyr = cps.lyr
-    DOTRoads = cps.DOTRoads
+    DOTRoadsGDB = cps.DOTRoadsGDB
 
     """Codify the City Limit\city number for LRS , calculated for LEFT and RIGHT from NG911)"""
     AddMessage("Calculating City Codes.")
-    TableView(DOTRoads+"\\City_Limits", "City_Limits")
+    TableView(DOTRoadsGDB+"\\City_Limits", "City_Limits")
     JoinTbl(lyr,"MUNI_R","City_Limits", "CITY", "KEEP_COMMON")
     CalcField(lyr,"KDOT_CITY_R","str(!City_Limits.CITY_CD!).zfill(3)","PYTHON_9.3","#")
     removeJoin(lyr)
@@ -466,7 +475,7 @@ def RoadinName1(cps):
 def RoadinName(roadFeatures, nameExclusions, cps):
     lyr = cps.lyr
     Alias = cps.Alias
-    DOTRoads = cps.DOTRoads
+    DOTRoadsGDB = cps.DOTRoadsGDB
     gdb = cps.gdbPath
     
     ordinalNumberEndings = cps.ordinalEndings
@@ -857,14 +866,14 @@ def Kdot_RouteNameCalc(cps):
 # Kdot_RouteNameCalc() seems to fix the problem.
 def AliasCalc(cps):
     Alias = cps.Alias
-    DOTRoads = cps.DOTRoads
+    DOTRoadsGDB = cps.DOTRoadsGDB
 
     """"calculate the KDOT codes for state highways - the state highways are consistently stored in the Alias Table, and that is used to identify state highways for LRS in Highway Calc function"""
     "Calculating KDOT codes for the Alias Table."
     CalcField(Alias, "KDOT_PREFIX", "!A_RD![0]","PYTHON_9.3","#")
     SelectLayerByAttribute_management(Alias, "NEW_SELECTION", "A_RD like 'K-%' OR A_RD like 'US-%' OR A_RD like 'I-%' ")
     CalcField(Alias,"KDOT_ROUTENAME","""!A_RD![1:].replace("S","").zfill(3)""","PYTHON_9.3","#")
-    TableView(DOTRoads+"\\KDOT_RoutePre", "KDOT_RoutePre", "#")#this was not firing 
+    TableView(DOTRoadsGDB+"\\KDOT_RoutePre", "KDOT_RoutePre", "#")#this was not firing 
     JoinTbl("RoadAlias", "KDOT_PREFIX", "KDOT_RoutePre", "LRSPrefix", "KEEP_COMMON")
     SelectLayerByAttribute_management(Alias, "NEW_SELECTION", "A_RD like 'K-%' OR A_RD like 'K %' OR A_RD like 'US-%' OR A_RD like 'US %'OR A_RD like 'I-%' OR A_RD like 'I %'  ")
     CalcField(Alias,"RoadAlias.KDOT_CODE","!KDOT_RoutePre.PreCode!","PYTHON_9.3","#")
@@ -920,7 +929,7 @@ def LRS_Tester(cps):
 def createUniqueIdentifier(cps):
     lyr = cps.lyr
     Alias = cps.Alias
-    DOTRoads = cps.DOTRoads
+    DOTRoadsGDB = cps.DOTRoadsGDB
     gdb = cps.gdbPath
     '''filters through records and calculates an incremental Unique Identifier for routes that are not border routes, to handle Y's, eyebrows, and splits that would cause complex routes'''
     "Creating unique identifiers."
