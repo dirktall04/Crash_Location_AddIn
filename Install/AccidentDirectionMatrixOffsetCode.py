@@ -97,14 +97,14 @@ def InitalizeCurrentPathSettings():
     pathSettingsInstance.useKDOTFields = True # -- Test the code to make sure that both lists of fields work properly.
     
     # Make sure that the KDOT fields or Non-KDOT fields are used consistently throughout the offsetting.
-    # With the unmodified versions of ON_ROAD_NAME/AT_ROAD/AT_ROAD_DIRECTION/AT_ROAD_DIST_FEET
+    # With the unmodified versions of ON_ROAD_NAME/AT_ROAD_NAME/AT_ROAD_DIRECTION/AT_ROAD_DIST_FEET
     pathSettingsInstance.NonKDOTXYFieldList = ['OBJECTID', 'STATUS', 'POINT_X', 'POINT_Y', 'ACCIDENT_KEY', 'ON_ROAD_NAME',
-                                               'AT_ROAD_DIRECTION', 'AT_ROAD_DISTANCE_FEET', 'ON_ROAD_KDOT_NAME',
+                                               'AT_ROAD_DIRECTION', 'AT_ROAD_DISTANCE_FEET', 'AT_ROAD_NAME',
                                                'Match_addr']
     
-    # With the KDOT modified versions of ON_ROAD_NAME/AT_ROAD/AT_ROAD_DIRECTION/AT_ROAD_DIST_FEET
+    # With the KDOT modified versions of ON_ROAD_NAME/AT_ROAD_NAME/AT_ROAD_DIRECTION/AT_ROAD_DIST_FEET
     pathSettingsInstance.KDOTXYFieldList = ['OBJECTID', 'STATUS', 'POINT_X', 'POINT_Y', 'ACCIDENT_KEY', 'ON_ROAD_KDOT_NAME',
-                                               'AT_ROAD_KDOT_DIRECTION', 'AT_ROAD_KDOT_DIST_FEET', 'ON_ROAD_KDOT_NAME',
+                                               'AT_ROAD_KDOT_DIRECTION', 'AT_ROAD_KDOT_DIST_FEET', 'AT_ROAD_KDOT_NAME',
                                                'Match_addr']
     
     return pathSettingsInstance

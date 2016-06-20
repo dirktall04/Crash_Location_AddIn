@@ -20,7 +20,7 @@
 # KMG           12/18/2014 Added Topology and geometric network tools, general cleanup        
 # KMG            1/7/2015 general edit checking and cleanup
 # DAT            2015-04-27 Added the ability to use parameters from an ArcGIS Script Tool Interface.
-# DAT            2015-05-05 TODONE: Fixed the error where KDOT_ROUTNAME was not populating correctly.
+# DAT            2015-05-05 Fixed the error where KDOT_ROUTNAME was not populating correctly.
 # DAT            2015-05-05 -- Offset Script should be using I/U/K sorting, look there
 # DAT            UpdateKdotNameInCenterline, compareRouteNames are the functions to look at from Offset Script.
 # DAT            2015-05-05 -- Numdex Function should be using the rest of what we need.
