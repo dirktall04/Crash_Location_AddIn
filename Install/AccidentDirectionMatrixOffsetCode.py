@@ -56,7 +56,7 @@ def UpdateOptionsWithParameters(optionsObject):
     else:
         pass
     if (option4 is not None and option4 != ""): # Boolean choice of whether or not to use KDOT fields
-        optionsObject.useKDOTFields = option4
+        optionsObject.useKDOTFields = option4 ## Comes in as text rather than boolean.
     else:
         pass
     
@@ -99,7 +99,7 @@ def InitalizeCurrentPathSettings():
     # Make sure that the KDOT fields or Non-KDOT fields are used consistently throughout the offsetting.
     # With the unmodified versions of ON_ROAD_NAME/AT_ROAD_NAME/AT_ROAD_DIRECTION/AT_ROAD_DIST_FEET
     pathSettingsInstance.NonKDOTXYFieldList = ['OBJECTID', 'STATUS', 'POINT_X', 'POINT_Y', 'ACCIDENT_KEY', 'ON_ROAD_NAME',
-                                               'AT_ROAD_DIRECTION', 'AT_ROAD_DISTANCE_FEET', 'AT_ROAD_NAME',
+                                               'AT_ROAD_DIRECTION', 'AT_ROAD_DIST_FEET', 'AT_ROAD_NAME',
                                                'Match_addr']
     
     # With the KDOT modified versions of ON_ROAD_NAME/AT_ROAD_NAME/AT_ROAD_DIRECTION/AT_ROAD_DIST_FEET
@@ -184,10 +184,11 @@ def OffsetDirectionMatrix2(offsetOptions):
     maximumDegreesDifference = offsetOptions.maxDegreesDifference
     KDOTFieldUse = offsetOptions.useKDOTFields
     
-    ## Have to use the check this way because "true" from parameters
-    ## doesn't equal "True" in Python for some reason.
-    if KDOTFieldUse == False:
+    AddMessage("The value for KDOTFieldUse is:" + str(KDOTFieldUse))
+    
+    if str(KDOTFieldUse).lower() == 'false':
         featuresWithXYFieldList = offsetOptions.NonKDOTXYFieldList
+        AddMessage("Using nonKDOTXYFieldList.")
     else:
         featuresWithXYFieldList = offsetOptions.KDOTXYFieldList
     
@@ -231,6 +232,10 @@ def OffsetDirectionMatrix2(offsetOptions):
     
     print "The path of the geocodedFeatures used is: " + geocodedFeatures
     
+    #AddMessage("The field names used in the search cursor are:")
+    #for fieldListItem in featuresWithXYFieldList:
+    #    AddMessage(fieldListItem)
+    
     accidentsCursor = SearchCursor(geocodedLocXY, featuresWithXYFieldList)
     
     for accidentRow in accidentsCursor:
@@ -244,7 +249,7 @@ def OffsetDirectionMatrix2(offsetOptions):
     for geocodedAccident in geocodedAccidentsList:
         
         # Create a point here with the x & y from the geocodedAccident,
-        # add a the coordinate system, OBJECTID, and AccidentID
+        # add the coordinate system, OBJECTID, and AccidentID
         # from the geocodedAccident layer.
         # Then, create a buffer with it.
         
@@ -432,13 +437,13 @@ def OffsetDirectionMatrix2(offsetOptions):
         for updateListItem in updateListValues:
             if cursorItem[0] == updateListItem[0]:
                 if str(cursorItem[2]).upper() == 'TRUE':    # Don't make any changes if true.
-                    print 'The accident point with Acc_Key: ' + str(cursorItem[0]) + ' is already offset.'
+                    AddMessage('The accident point with Acc_Key: ' + str(cursorItem[0]) + ' is already offset.')
                 else:                                       # Otherwise, offset the point.
                     editableCursorItem = list(cursorItem)
-                    #print 'Found a matching cursorItem with an Accident_Key of ' + str(cursorItem[0]) + "."
+                    #AddMessage('Found a matching cursorItem with an Accident_Key of ' + str(cursorItem[0]) + ".")
                     editableCursorItem[1] = (updateListItem[1], updateListItem[2])
                     editableCursorItem[2] = updateListItem[3]
-                    #print str(editableCursorItem)
+                    #AddMessage(str(editableCursorItem))
                     accidentUpdateCursor.updateRow(editableCursorItem)
                     
             else:
@@ -457,8 +462,8 @@ def SetupOutputFeatureClass(outputFeatureClassOptions):
     #outputTableName = (os.path.split(outputWithOffsetLocations))[-1]
     
     if Exists(outputWithOffsetLocations):
-        print "The output table with offset information already exists."
-        print "Will not copy over it."
+        AddMessage("The output table with offset information already exists.")
+        AddMessage("Will not copy over it.")
         
         # Need to check to see if the outputWithOffsetLocations already has a
         # field called isOffset, and if not, create one.
@@ -475,7 +480,7 @@ def SetupOutputFeatureClass(outputFeatureClassOptions):
         # If the KDOT_ROUTENAME field is not found,
         # add it with adequate parameters.
         if str(fieldNameToAdd) not in fieldNamesList:
-            #print "Adding KDOT_ROUTENAME to " + centerlineToIntersect + "."
+            #AddMessage("Adding KDOT_ROUTENAME to " + centerlineToIntersect + ".")
             #previousWorkspace = env.workspace  # @UndefinedVariable
             addFieldWorkspace = outputGDB
             
@@ -483,15 +488,15 @@ def SetupOutputFeatureClass(outputFeatureClassOptions):
             
             ##
             AddField_management(outputWithOffsetLocations, fieldNameToAdd, "TEXT", "", "", fieldLength)
-            print "The " + str(fieldNameToAdd) + " field was added to " + str(outputWithOffsetLocations) + "."
+            AddMessage("The " + str(fieldNameToAdd) + " field was added to " + str(outputWithOffsetLocations) + ".")
             
             # Set the workspace back to what it was previously to prevent
             # problems from occurring in the rest of the script.
             #env.workspace = previousWorkspace
         
         else:
-            print "The " + str(fieldNameToAdd) + " field already exists within " + outputWithOffsetLocations + "."
-            print "It will not be added again, but its values will be updated (where necessary)."
+            AddMessage( "The " + str(fieldNameToAdd) + " field already exists within " + outputWithOffsetLocations + ".")
+            AddMessage("It will not be added again, but its values will be updated (where necessary).")
         
     else:
         print "Rebuilding the output table..."
@@ -509,7 +514,7 @@ def SetupOutputFeatureClass(outputFeatureClassOptions):
         # instead of taking the full path.
         ##
         AddField_management(outputWithOffsetLocations, fieldNameToAdd, "TEXT", "", "", fieldLength)
-        print "The " + str(fieldNameToAdd) + " field was added to " + str(outputWithOffsetLocations) + "."
+        AddMessage("The " + str(fieldNameToAdd) + " field was added to " + str(outputWithOffsetLocations) + ".")
 
 
 def findTheMostInterestingRow(listOfRows, testDirection, maxAngleDiff):
@@ -569,7 +574,7 @@ def findTheMostInterestingRow(listOfRows, testDirection, maxAngleDiff):
         currentUpdateList = createUpdateList(listOfRows, targetAngle, maxAngleDiff)
         
     else:
-        print "Invalid direction given for the At Road: " + testDirection
+        AddMessage("Invalid direction given for the At Road: " + testDirection)
         
     return currentUpdateList # Change to return an update list.
 
@@ -650,8 +655,8 @@ def createUpdateList(rowList, inputAngle, maxDifference):
         # when the direction column says that it should be offset to the South.
         # bestDirValue is not a representation of difference, use bestDirMin instead.
         if bestDirMin > abs(maxDifference):
-            print 'The maximum degree difference for the best potential offset location was exceeded for:'
-            print 'Acc_Key: ' + str(thisUpdateList[0]) + ' with a degree difference of: ' + str(bestDirMin)
+            #AddMessage('The maximum degree difference for the best potential offset location was exceeded for:')
+            #AddMessage('Acc_Key: ' + str(thisUpdateList[0]) + ' with a degree difference of: ' + str(bestDirMin))
             
             thisUpdateList = [-1, -1, -1, "False"]
             
@@ -705,7 +710,7 @@ def compareRouteNames(bestName, currentName):
             pass
         
     except:
-        print "An error occurred."
+        AddMessage("An error occurred.")
     
     return bestName
 
@@ -732,7 +737,7 @@ def UpdateKdotNameInCenterline(centerlineToIntersect, centerlineAliasTable):
     # If the KDOT_ROUTENAME field is not found,
     # add it with adequate parameters.
     if "KDOT_ROUTENAME" not in fieldNamesList:
-        #print "Adding KDOT_ROUTENAME to " + centerlineToIntersect + "."
+        #AddMessage("Adding KDOT_ROUTENAME to " + centerlineToIntersect + ".")
         #previousWorkspace = env.workspace  # @UndefinedVariable
         addFieldWorkspace = getGDBLocationFromFC(centerlineToIntersect)
         env.workspace = addFieldWorkspace
@@ -745,11 +750,11 @@ def UpdateKdotNameInCenterline(centerlineToIntersect, centerlineAliasTable):
         # Set the workspace back to what it was previously to prevent
         # problems from occurring in the rest of the script.
         #env.workspace = previousWorkspace
-        print "The " + str(fieldNameToAdd) + " field was added to " + str(centerlineToIntersect) + "."
+        AddMessage("The " + str(fieldNameToAdd) + " field was added to " + str(centerlineToIntersect) + ".")
     
     else:
-        print "The KDOT_ROUTENAME field already exists within " + centerlineToIntersect + "."
-        print "It will not be added again, but its values will be updated (where necessary)."
+        AddMessage("The KDOT_ROUTENAME field already exists within " + centerlineToIntersect + ".")
+        AddMessage("It will not be added again, but its values will be updated (where necessary).")
     
     aliasFields = ['SEGID', 'KDOT_ROUTENAME']
     
@@ -824,7 +829,7 @@ def UpdateKdotNameInCenterline(centerlineToIntersect, centerlineAliasTable):
         editSession.stopEditing(True)
     
     except ExecuteError:
-        print(GetMessages(2))
+       AddMessage((GetMessages(2)))
 
 
 def getGDBLocationFromFC(fullFeatureClassPath):
@@ -832,7 +837,7 @@ def getGDBLocationFromFC(fullFeatureClassPath):
     
     if test1[0][-4:] == ".sde":
         gdbPath = test1[0]
-        print "The SDE GDB path is " + str(gdbPath)
+        AddMessage("The SDE GDB path is " + str(gdbPath))
     elif test1[0][-4:] == ".gdb":
         gdbPath = os.path.dirname(fullFeatureClassPath)
     else:
@@ -841,7 +846,17 @@ def getGDBLocationFromFC(fullFeatureClassPath):
     return gdbPath
 
 def ParseMatchAddr(fullMatchAddr):
-    return 'A'
+    parsedFirstRoad = ''
+    commaSplitList = fullMatchAddr.split(',')
+    commaSplitPart = commaSplitList[0]
+    ampSplitList = commaSplitPart.split('&')
+    ampSplitPart = ampSplitList[0]
+    parsedFirstRoad = ampSplitPart.strip()
+    #split on comma
+    #split the first portion on &
+    #remove trailing space
+    #AddMessage("Parsed match addr " + str(parsedFirstRoad))
+    return parsedFirstRoad
 
 
 def offsetdirectioncaller(intersectPoints, aliasLocation, centerlineLocation, offsetPointOutput, useKDOTIntersect):

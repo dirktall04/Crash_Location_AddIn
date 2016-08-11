@@ -259,7 +259,7 @@ def RoadNameRepair(optionsObject):
         
         ####################################################
         # This script will now begin updates based on      #
-        # seven patterns. The patterns are checked against #
+        # eight patterns. The patterns are checked against #
         # data strings in the target accident data layer.  #
         # If it find matches, it attempts to make          #
         # updates and/or corrections to the data. If there #
