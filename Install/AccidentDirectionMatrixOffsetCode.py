@@ -18,14 +18,21 @@
 import math
 import os
 import sys
+import time
 from arcpy import (AddXY_management, AddJoin_management, AddField_management, AddFieldDelimiters, AddMessage, # @UnusedImport
-                   Buffer_analysis, CopyFeatures_management, Delete_management, Describe, env, Exists, ExecuteError, # @UnusedImport 
+                   Append_management, Buffer_analysis, CopyFeatures_management, Delete_management, Describe, # @UnusedImport 
+                   env, Exists, ExecuteError, # @UnusedImport 
                    GetMessages, Intersect_analysis, JoinField_management, ListFields, MakeFeatureLayer_management, # @UnusedImport
                    MultipartToSinglepart_management, Point, PointGeometry, SelectLayerByAttribute_management, # @UnusedImport
                    GetCount_management, GetParameterAsText) # @UnusedImport
 
 
 from arcpy.da import Editor, SearchCursor, UpdateCursor  # @UnresolvedImport
+from pathFunctions import (returnGDBOrSDEPath, returnFeatureClass, returnGDBOrSDEName)
+try:
+    from flattenTableJoinOntoTable import tableOntoTableCaller, GenerateFlatTableColumnNames
+except:
+    print ("Could not import the tableOntoTableCaller or GenerateFlatTableColumnNames function from flattenTableJoinOntoTable.py.")
 
 
 def UpdateOptionsWithParameters(optionsObject):
@@ -56,7 +63,10 @@ def UpdateOptionsWithParameters(optionsObject):
     else:
         pass
     if (option4 is not None and option4 != ""): # Boolean choice of whether or not to use KDOT fields
-        optionsObject.useKDOTFields = option4 ## Comes in as text rather than boolean.
+        if (option4.lower() == 'false'): ## Comes in as text rather than boolean.
+            optionsObject.useKDOTFields = False
+        else:
+            optionsObject.useKDOTFields = True
     else:
         pass
     
@@ -90,10 +100,10 @@ def InitalizeCurrentPathSettings():
     pathSettingsInstance.accidentDataAtIntersections = r'\\gisdata\ArcGIS\GISdata\Accident Geocode\GC_OFFSET_20150210.gdb\Geocoding_Result_8'
     pathSettingsInstance.accidentDataWithOffsetOutput = r'\\gisdata\ArcGIS\GISdata\Accident Geocode\GC_OFFSET_20150210.gdb\Geocoding_Result_12_Offset_Test'
     ## GDB Location should be derived from accidentDataWithOffsetOutput location.
-    pathSettingsInstance.maxDegreesDifference = 80
+    pathSettingsInstance.maxDegreesDifference = 65
     pathSettingsInstance.whereClauseInUse = True
     
-    # If this value is True, use the KDOT field list, otherwise, use the other one.
+    # If this value is True, use the KDOT field list, otherwise, use the NonKDOT (LEO) fields.
     pathSettingsInstance.useKDOTFields = True # -- Test the code to make sure that both lists of fields work properly.
     
     # Make sure that the KDOT fields or Non-KDOT fields are used consistently throughout the offsetting.
@@ -106,6 +116,11 @@ def InitalizeCurrentPathSettings():
     pathSettingsInstance.KDOTXYFieldList = ['OBJECTID', 'STATUS', 'POINT_X', 'POINT_Y', 'ACCIDENT_KEY', 'ON_ROAD_KDOT_NAME',
                                                'AT_ROAD_KDOT_DIRECTION', 'AT_ROAD_KDOT_DIST_FEET', 'AT_ROAD_KDOT_NAME',
                                                'Match_addr']
+                                               
+    # Supports the new continuous process and output specifications.
+    pathSettingsInstance.aliasTableGCIDForJoining = None
+    pathSettingsInstance.roadwayTableGCIDForJoining = None
+    pathSettingsInstance.flattenedRoadwayTable = r"in_memory\flattenedRoadwayTable"
     
     return pathSettingsInstance
 
@@ -117,7 +132,7 @@ def OffsetDirectionMatrix2(offsetOptions):
     gdbLocation -- The gdb where the outputWithOffsetLocations feature class resides.
     accidentDataAtIntersections -- A point feature class containing geocoded accident information.
     accidentDataWithOffsetOutput -- A point feature class with the same structure as the 
-        geocodedFeatuers AND an "isOffset" row of type "TEXT" with length of at least 5.
+        geocodedFeatuers AND an "isOffset" row of type "TEXT" with length of at least 25.
     whereClauseInUse -- Whether or not the script will use a where clause. Boolean value.
     roadsFeaturesLocation -- The path to the local roads centerline feature class.
     aliasTable -- The path to the roads alias table for the roads centerline feature class.
@@ -186,13 +201,14 @@ def OffsetDirectionMatrix2(offsetOptions):
     
     AddMessage("The value for KDOTFieldUse is:" + str(KDOTFieldUse))
     
-    if str(KDOTFieldUse).lower() == 'false':
+    if KDOTFieldUse == False:
         featuresWithXYFieldList = offsetOptions.NonKDOTXYFieldList
-        AddMessage("Using nonKDOTXYFieldList.")
+        AddMessage("Using the nonKDOTXYFieldList.")
     else:
         featuresWithXYFieldList = offsetOptions.KDOTXYFieldList
+        AddMessage("Using the KDOTXYFieldList.")
     
-    geodatabaseLocation = getGDBLocationFromFC(outputWithOffsetLocations)
+    geodatabaseLocation = returnGDBOrSDEPath(outputWithOffsetLocations)
     
     env.workspace = geodatabaseLocation
     env.overwriteOutput = True
@@ -205,7 +221,9 @@ def OffsetDirectionMatrix2(offsetOptions):
     intermediateAccidentIntersect = r'in_memory\intermediateAccidentIntersect'
     intermediateAccidentIntersectSinglePart = r'in_memory\intermediateAccidentIntersectSinglePart'
     
-    descSpatialReference = Describe(geocodedFeatures).spatialReference
+    geocodedFeatureDesc = Describe(geocodedFeatures)
+    descSpatialReference = geocodedFeatureDesc.spatialReference
+    del geocodedFeatureDesc
     
     # Make a feature layer of geocodedFeatures using a where clause to restrict to those points
     # which have been located to an intersection, then add XY to it.
@@ -219,7 +237,25 @@ def OffsetDirectionMatrix2(offsetOptions):
     # If not, add it.
     # Then update the field using the best route name alias.
     
-    UpdateKdotNameInCenterline(roadsToIntersect, roadsAliasTable)
+    if offsetOptions.fromContinuousCaller is not None:
+        passedBaseTableLocation = offsetOptions.roadsFeaturesLocation
+        passedBaseTableJoinIDName = offsetOptions.roadwayTableGCIDForJoining
+        passedAliasTableLocation = offsetOptions.aliasTable        
+        passedAliasTableJoinIDName = offsetOptions.aliasTableGCIDForJoining
+        passedAliasTableRoadNameFields = offsetOptions.aliasTableRoadNameFields
+        passedFlattenedTable = offsetOptions.flattenedRoadwayTable
+        passedFlatFieldBaseName = offsetOptions.flattenedAliasColumnBaseName
+        descSpatialReference = offsetOptions.outputSR
+        fromContinuous = offsetOptions.fromContinuousCaller
+        print("Calling the tableOntoTableCaller function with these parameters.")
+        print(str(passedBaseTableLocation) + ", " + str(passedBaseTableJoinIDName) + ", " + str(passedAliasTableLocation) + ", " + str(passedAliasTableJoinIDName) + ", " + str(passedAliasTableRoadNameFields) + ", " + str(passedFlattenedTable) + ", " + str(passedFlatFieldBaseName))
+        additionalColumnCount = tableOntoTableCaller(passedBaseTableLocation, passedBaseTableJoinIDName, passedAliasTableLocation,
+            passedAliasTableJoinIDName, passedAliasTableRoadNameFields, passedFlattenedTable, passedFlatFieldBaseName)
+        
+        roadsToIntersect = passedFlattenedTable
+        offsetOptions.numberOfAliasNameColumns = additionalColumnCount
+    else:
+        UpdateKdotNameInCenterline(roadsToIntersect, roadsAliasTable)
     
     MakeFeatureLayer_management(roadsToIntersect, roadsAsFeatureLayer)
     
@@ -228,7 +264,7 @@ def OffsetDirectionMatrix2(offsetOptions):
     # result from intersecting the buffer & road geometries.    
     
     geocodedAccidentsList = list()
-    singlePartOffsetAccidentsList = list()
+    singlePartOffsetCrashesList = list()
     
     print "The path of the geocodedFeatures used is: " + geocodedFeatures
     
@@ -246,164 +282,25 @@ def OffsetDirectionMatrix2(offsetOptions):
     except:
         pass
     
-    for geocodedAccident in geocodedAccidentsList:
-        
-        # Create a point here with the x & y from the geocodedAccident,
-        # add the coordinate system, OBJECTID, and AccidentID
-        # from the geocodedAccident layer.
-        # Then, create a buffer with it.
-        
-        #if geocodedAccident[2] is not None and geocodedAccident[3] is not None:
-        tempPoint = Point(geocodedAccident[2], geocodedAccident[3])
-        #print "\t " + str(tempPoint.X) + ", " + str(tempPoint.Y)
-        tempPointGeometry = PointGeometry(tempPoint, descSpatialReference)
-        accidentDistanceOffset = geocodedAccident[7]
-        accidentClusterTolerance = 2
-        
-        
-        ###########################################################################
-        ## TODO: Add alternate names to a copy of the road centerline features
-        ## and allow the where clause to select those alternate names as well
-        ## i.e.:
-        ##
-        ##          streetWhereClause = (""" "RD" = '""" + firstRoadName  + """'""" + """ OR """ +
-        ##                                  """ "RD_ALT_NAME_1" = '""" + firstRoadName  + """'""" + """ OR """ +
-        ##                                  """ "RD_ALT_NAME_2" = '""" + firstRoadName  + """'""" + """ OR """ +
-        ##                                  """ "KDOT_ROUTENAME" = '""" + firstRoadName + """'""" + """ OR """ +
-        ##                                  """ "RD" = '""" + secondRoadName  + """'""" + """ OR """
-        ##                                  """ "RD_ALT_NAME_1" = '""" + secondRoadName  + """'""" + """ OR """ +
-        ##                                  """ "RD_ALT_NAME_2" = '""" + secondRoadName  + """'""" + """ OR """ +
-        ##                                  """ "KDOT_ROUTENAME" = '""" + secondRoadName + """'""")                        
-        ##
-        ## Or similar. Get the alternate names for each county from the StreetsCounty_Int
-        ## dataset, or a better one, if you can find one.
-        ###########################################################################
-        
-        if whereClauseFlag == True:
-            try:
-                #####################
-                # Offsetting while using a WhereClause follows:
-                #####################
-                if accidentDistanceOffset is not None: # In Python it's None, whereas in an ArcGIS table it's <null>
-                    
-                    accidentDistanceOffset = int(accidentDistanceOffset)
-                    
-                    if accidentDistanceOffset != 0:
-                        
-                        Buffer_analysis(tempPointGeometry, intermediateAccidentBuffer, accidentDistanceOffset)
-                        
-                        firstRoadName = str(geocodedAccident[5])
-                        firstRoadName = firstRoadName.upper()
-                        secondRoadName = str(geocodedAccident[8])
-                        secondRoadName = secondRoadName.upper()
-                        
-                        thirdRoadName = ParseMatchAddr(geocodedAccident[9])
-                        thirdRoadName = thirdRoadName.upper()
-                        
-                        # Going to need to get the first road from the Arc_Street field and make it
-                        # the third road name option. Split based on | and use the first string.
-                        # Make a function to parse the Match_Addr field to the matched On_Road name.
-                        # Needs to separate by %, then remove anything like "W ", " AVE", etc...
-                        
-                        # Discovered a bug, missing "+" at the end of the 3rd line.
-                        # Corrected 2015-07-20
-                        streetWhereClause = (""" "RD" = '""" + firstRoadName  + """'""" + """ OR """ +
-                                                """ "KDOT_ROUTENAME" = '""" + firstRoadName + """'""" + """ OR """ +
-                                                """ "RD" = '""" + secondRoadName  + """'""" + """ OR """ +
-                                                """ "KDOT_ROUTENAME" = '""" + secondRoadName + """'""" + """ OR """ +
-                                                """ "RD" = '""" + thirdRoadName  + """'""" + """ OR """ +
-                                                """ "KDOT_ROUTENAME" = '""" + thirdRoadName + """'""")
-                        
-                        SelectLayerByAttribute_management(roadsAsFeatureLayer, "NEW_SELECTION", streetWhereClause)
-                        
-                        selectionCount = str(GetCount_management(roadsAsFeatureLayer))
-                        
-                        if int(selectionCount) != 0:
-                            featuresToIntersect = [roadsAsFeatureLayer, intermediateAccidentBuffer]
-                            Intersect_analysis(featuresToIntersect, intermediateAccidentIntersect, "ALL", accidentClusterTolerance, "POINT")
-                            
-                            if  int(str(GetCount_management(intermediateAccidentIntersect))) > 0:
-                                MultipartToSinglepart_management(intermediateAccidentIntersect, intermediateAccidentIntersectSinglePart)
-                                
-                                singlePartsCursor = SearchCursor(intermediateAccidentIntersectSinglePart, ['SHAPE@XY'])
-                                for singlePart in singlePartsCursor:
-                                    singlePartListItem = [singlePart[0], geocodedAccident[2], geocodedAccident[3], geocodedAccident[4],
-                                                               geocodedAccident[6], geocodedAccident[0]]
-                                    singlePartOffsetAccidentsList.append(singlePartListItem)
-                                
-                                try:
-                                    del singlePartsCursor
-                                except:
-                                    pass
-                            else:
-                                pass
-                        else:
-                            pass
-                            #print 'Zero road segments selected. Will not attempt to offset.'
-                    else:
-                        pass
-                        #print 'AT_ROAD_DIST_FEET is 0. Will not attempt to offset.
-                else:
-                    pass
-                    #print 'AT_ROAD_DIST_FEET is null. Will not attempt to offset.'
-            except:
-                print "WARNING:"
-                print "An error occurred which prevented the accident point with Acc_Key: " + str(geocodedAccident[4])
-                print "from being buffered and/or offset properly."
-        
-        elif whereClauseFlag == False:
-            try:
-                #####################
-                # Offsetting while not using a WhereClause follows:
-                #####################
-                
-                if accidentDistanceOffset is not None:
-                    if int(accidentDistanceOffset) != 0:
-                        accidentDistanceOffset = int(accidentDistanceOffset)
-                        
-                        Buffer_analysis(tempPointGeometry, intermediateAccidentBuffer, accidentDistanceOffset)
-                        
-                        featuresToIntersect = [roadsAsFeatureLayer, intermediateAccidentBuffer]
-                        Intersect_analysis(featuresToIntersect, intermediateAccidentIntersect, "ALL", accidentClusterTolerance, "POINT")
-                        if  int(str(GetCount_management(intermediateAccidentIntersect))) > 0:
-                            MultipartToSinglepart_management(intermediateAccidentIntersect, intermediateAccidentIntersectSinglePart)
-                            
-                            singlePartsCursor = SearchCursor(intermediateAccidentIntersectSinglePart, ['SHAPE@XY'])
-                            for singlePart in singlePartsCursor:
-                                singlePartListItem = [singlePart[0], geocodedAccident[2], geocodedAccident[3], geocodedAccident[4],
-                                                           geocodedAccident[6], geocodedAccident[0]]
-                                singlePartOffsetAccidentsList.append(singlePartListItem)
-                            
-                            try:
-                                del singlePartsCursor
-                            except:
-                                pass
-                        else:
-                            pass
-                    else:
-                        pass
-                        # Need to change this to being offset to the intersection, i.e. no movement, but
-                        # considered to be correctly offset all the same.
-                        #print 'AT_ROAD_DIST_FEET is 0. Will not attempt to offset.' 
-                else:
-                    pass
-                    #print 'AT_ROAD_DIST_FEET is null. Will not attempt to offset.'
-            except:
-                print "WARNING:"
-                print "An error occurred which prevented the accident point with Acc_Key: " + str(geocodedAccident[4])
-                print "from being buffered and/or offset properly."
-        
-        else:
-            pass
-            #print 'Please set the whereClauseFlag to either (boolean) True or False.'
+    # Replacement function for having the code inline here
+    # since I needed to be able to specify more options.
+    singlePartOffsetCrashesList = buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, whereClauseFlag, fromContinuous)
     
+    removeDuplicatesFromSinglePartFeatures(singlePartOffsetCrashesList)
+
+
+def removeDuplicatesFromSinglePartFeatures(singlePartFeauresList):
     offsetDictionaryByAccidentKey = dict()
     listContainer = list()
+    
+    # Going to have to make the accident_key used here not just the accident key, but also
+    # some additional information that make sure that each geocoded and offset accident
+    # is unique even if there are multiples with the same accident key.
     
     # Group the rows by accident_key for further analysis,
     # and add them to the dictionary/list/list data structure.
     
-    for singlePartOffsetItem in singlePartOffsetAccidentsList:
+    for singlePartOffsetItem in singlePartFeauresList:
         if singlePartOffsetItem[3] in offsetDictionaryByAccidentKey.keys():
             listContainer = offsetDictionaryByAccidentKey[singlePartOffsetItem[3]]
             listContainer.append(singlePartOffsetItem)
@@ -436,7 +333,7 @@ def OffsetDirectionMatrix2(offsetOptions):
     for cursorItem in accidentUpdateCursor:
         for updateListItem in updateListValues:
             if cursorItem[0] == updateListItem[0]:
-                if str(cursorItem[2]).upper() == 'TRUE':    # Don't make any changes if true.
+                if str(cursorItem[2]) == 'NormalOffset':    # Don't make any changes if true.
                     AddMessage('The accident point with Acc_Key: ' + str(cursorItem[0]) + ' is already offset.')
                 else:                                       # Otherwise, offset the point.
                     editableCursorItem = list(cursorItem)
@@ -447,74 +344,103 @@ def OffsetDirectionMatrix2(offsetOptions):
                     accidentUpdateCursor.updateRow(editableCursorItem)
                     
             else:
-                pass # This will always happen when updateListItem has a value of -1 in the 0th position, since that is not a valid Acc_Key.
+                pass # This will always happen when updateListItem has a value of -1 in the 0th position,
+                # since that is not a valid Acc_Key.
+    
+    # Add an "isOffset" value of 'ZeroDistanceOffset' that is used when the the offset
+    # distance is less than 5 ft or if the distance is null which allows
+    # the crash to be considered to be correctly offset at the intersection.
+    lowDistanceOrNullIsOffset(offsetOptions)
+
+
+def lowDistanceOrNullIsOffset(offsetOptions):
+    try:
+        accidentDataToUpdate = offsetOptions.accidentDataWithOffsetOutput
+        
+        zeroDistanceOffset = "ZeroDistanceOffset"
+        
+        accidentUpdateCursorFields = [None]
+        
+        if offsetOptions.useKDOTFields == True:
+            accidentUpdateCursorFields = ['ACCIDENT_KEY', offsetOptions.KDOTXYFieldList[7], 'isOffset']
+        else:
+            accidentUpdateCursorFields = ['ACCIDENT_KEY', offsetOptions.NonKDOTXYFieldList[7], 'isOffset']
+        
+        accidentUpdateCursor = UpdateCursor(accidentDataToUpdate, accidentUpdateCursorFields)
+        for cursorItem in accidentUpdateCursor:
+            try:
+                if cursorItem[1] is None:
+                    print("The offset distance is None. Marking it as a zero distance offset")
+                    editableCursorItem = list(cursorItem)
+                    editableCursorItem[2] = zeroDistanceOffset
+                    accidentUpdateCursor.updateRow(editableCursorItem)
+                elif int(str(cursorItem[1])) < 5:
+                    print("cursorItem[1] is less than 5. Marking it as a zero distance offset.")
+                    editableCursorItem = list(cursorItem)
+                    editableCursorItem[2] = zeroDistanceOffset
+                    accidentUpdateCursor.updateRow(editableCursorItem)
+                else:
+                    pass
+            except:
+                print("Something went wrong in the lowDistanceOrNullIsOffset update cursor.")
+    except:
+        print("Something went wrong in the lowDistanceOrNullIsOffset function.")
 
 
 def SetupOutputFeatureClass(outputFeatureClassOptions):
+    # Should be geocoding to an in_memory location and then just
+    # moving the features that were either not relocated due to
+    # short offset distance or were offset correctly.
+    
     geocodedFeatures = outputFeatureClassOptions.accidentDataAtIntersections
     geocodedFeaturesAsALayer = 'geocodedLayer'
     outputWithOffsetLocations = outputFeatureClassOptions.accidentDataWithOffsetOutput
     
     fieldNameToAdd = "isOffset"
-    fieldLength = 10
+    fieldLength = 25
     
-    outputGDB = getGDBLocationFromFC(outputWithOffsetLocations)
+    outputGDB = returnGDBOrSDEPath(outputWithOffsetLocations)
     #outputTableName = (os.path.split(outputWithOffsetLocations))[-1]
+    previousWorkspace = env.workspace  # @UndefinedVariable
+    env.workspace = outputGDB
     
     if Exists(outputWithOffsetLocations):
         AddMessage("The output table with offset information already exists.")
         AddMessage("Will not copy over it.")
         
-        # Need to check to see if the outputWithOffsetLocations already has a
-        # field called isOffset, and if not, create one.
-        
-        # Create a list of fields using the ListFields function
-        fieldsList = ListFields(outputWithOffsetLocations)
-        
-        fieldNamesList = list()
-        
-        # Iterate through the list of fields
-        for field in fieldsList:
-            fieldNamesList.append(field.name)
-        
-        # If the KDOT_ROUTENAME field is not found,
-        # add it with adequate parameters.
-        if str(fieldNameToAdd) not in fieldNamesList:
-            #AddMessage("Adding KDOT_ROUTENAME to " + centerlineToIntersect + ".")
-            #previousWorkspace = env.workspace  # @UndefinedVariable
-            addFieldWorkspace = outputGDB
-            
-            env.workspace = addFieldWorkspace
-            
-            ##
-            AddField_management(outputWithOffsetLocations, fieldNameToAdd, "TEXT", "", "", fieldLength)
-            AddMessage("The " + str(fieldNameToAdd) + " field was added to " + str(outputWithOffsetLocations) + ".")
-            
-            # Set the workspace back to what it was previously to prevent
-            # problems from occurring in the rest of the script.
-            #env.workspace = previousWorkspace
-        
-        else:
-            AddMessage( "The " + str(fieldNameToAdd) + " field already exists within " + outputWithOffsetLocations + ".")
-            AddMessage("It will not be added again, but its values will be updated (where necessary).")
-        
     else:
-        print "Rebuilding the output table..."
-        print "Attempting to use: " + outputWithOffsetLocations + " as the target FC."
-        env.workspace = outputGDB
+        print("Rebuilding the output table...")
+        print("Attempting to use: " + outputWithOffsetLocations + " as the target FC.")        
         
         MakeFeatureLayer_management(geocodedFeatures, geocodedFeaturesAsALayer)
         CopyFeatures_management(geocodedFeaturesAsALayer, outputWithOffsetLocations)
         print "Output table " + str(outputWithOffsetLocations) + " added."
         
-        fieldNameToAdd = "isOffset"
-        fieldLength = 10
-        
-        # AddField_management seems to require the gdb workspace path to be set
-        # instead of taking the full path.
-        ##
+        # Small timeout to make sure that the feature class has time to be completely created
+        # before calling describe or other functions on it.
+        time.sleep(10)
+    
+    
+    # Create a list of fields using the ListFields function
+    offsetDescriptionObject = Describe(outputWithOffsetLocations)
+    offsetFieldsList = offsetDescriptionObject.fields
+    
+    offsetFieldNamesList = [x.name for x in offsetFieldsList]
+    
+    # If the isOffset field is not found,
+    # add it with the necessary parameters.
+    if str(fieldNameToAdd) not in offsetFieldNamesList:
+        # AddMessage("Adding isOffset to " + centerlineToIntersect + ".")
         AddField_management(outputWithOffsetLocations, fieldNameToAdd, "TEXT", "", "", fieldLength)
         AddMessage("The " + str(fieldNameToAdd) + " field was added to " + str(outputWithOffsetLocations) + ".")
+        
+        # Set the workspace back to what it was previously to prevent
+        # problems from occurring in the rest of the script.
+    
+    else:
+        pass
+    
+    env.workspace = previousWorkspace
 
 
 def findTheMostInterestingRow(listOfRows, testDirection, maxAngleDiff):
@@ -525,6 +451,9 @@ def findTheMostInterestingRow(listOfRows, testDirection, maxAngleDiff):
     # Should it do anything other than printing a line
     # that says that the direction for the row
     # is invalid?
+    ## It will be updated as a Zero Distance Offset by the
+    ## added function that checks for that after the script
+    ## gets through this part.
     
     # Refactored: Test with unit tests to make sure this
     # still works properly.
@@ -574,14 +503,14 @@ def findTheMostInterestingRow(listOfRows, testDirection, maxAngleDiff):
         currentUpdateList = createUpdateList(listOfRows, targetAngle, maxAngleDiff)
         
     else:
-        AddMessage("Invalid direction given for the At Road: " + testDirection)
+        AddMessage("Invalid direction given for the offset direction: " + testDirection)
         
     return currentUpdateList # Change to return an update list.
 
 
-    # Reuses part of the extendAndIntersectRoadFeatures function from
-    # the countymaproadnamebordercreation script.
-    # Update that script with the improvements made here.
+# Reuses part of the extendAndIntersectRoadFeatures function from
+# the countymaproadnamebordercreation script.
+# Update that script with the improvements made here.
 def returnAngle(firstPointTuple, lastPointTuple):
     deltaY_1 = (lastPointTuple[1] - firstPointTuple[1]) ## UNmade y value negative
     deltaX_1 = (lastPointTuple[0] - firstPointTuple[0])
@@ -642,7 +571,7 @@ def createUpdateList(rowList, inputAngle, maxDifference):
                 thisUpdateList[0] = rowOfInterest[3]
                 thisUpdateList[1] = rowOfInterest[0][0]
                 thisUpdateList[2] = rowOfInterest[0][1]
-                thisUpdateList[3] = "True"
+                thisUpdateList[3] = "NormalOffset"
                 bestDirValue = thisDirValue
                 bestDirMin = thisDirMin
             else:
@@ -739,11 +668,11 @@ def UpdateKdotNameInCenterline(centerlineToIntersect, centerlineAliasTable):
     if "KDOT_ROUTENAME" not in fieldNamesList:
         #AddMessage("Adding KDOT_ROUTENAME to " + centerlineToIntersect + ".")
         #previousWorkspace = env.workspace  # @UndefinedVariable
-        addFieldWorkspace = getGDBLocationFromFC(centerlineToIntersect)
+        addFieldWorkspace = returnGDBOrSDEPath(centerlineToIntersect)
         env.workspace = addFieldWorkspace
         
         fieldNameToAdd = "KDOT_ROUTENAME"
-        fieldLength = 10
+        fieldLength = 25
         
         AddField_management(centerlineToIntersect, fieldNameToAdd, "TEXT", "", "", fieldLength)
         
@@ -802,7 +731,7 @@ def UpdateKdotNameInCenterline(centerlineToIntersect, centerlineAliasTable):
     
     # Have to start an edit session because the feature class participates in a topology.
     try:
-        editWorkspace = getGDBLocationFromFC(centerlineToIntersect)
+        editWorkspace = returnGDBOrSDEPath(centerlineToIntersect)
                 
         editSession = Editor(editWorkspace)
         
@@ -832,38 +761,41 @@ def UpdateKdotNameInCenterline(centerlineToIntersect, centerlineAliasTable):
        AddMessage((GetMessages(2)))
 
 
-def getGDBLocationFromFC(fullFeatureClassPath):
-    test1 = os.path.split(fullFeatureClassPath)
-    
-    if test1[0][-4:] == ".sde":
-        gdbPath = test1[0]
-        AddMessage("The SDE GDB path is " + str(gdbPath))
-    elif test1[0][-4:] == ".gdb":
-        gdbPath = os.path.dirname(fullFeatureClassPath)
-    else:
-        gdbPath = os.path.dirname(os.path.dirname(fullFeatureClassPath))
-    
-    return gdbPath
-
 def ParseMatchAddr(fullMatchAddr):
-    parsedFirstRoad = ''
-    commaSplitList = fullMatchAddr.split(',')
-    commaSplitPart = commaSplitList[0]
-    ampSplitList = commaSplitPart.split('&')
-    ampSplitPart = ampSplitList[0]
-    parsedFirstRoad = ampSplitPart.strip()
-    #split on comma
-    #split the first portion on &
-    #remove trailing space
-    #AddMessage("Parsed match addr " + str(parsedFirstRoad))
-    return parsedFirstRoad
+    # Search for the '&' character.
+    # If that doesn't exist, then just return the
+    # commaSplitListPart1 after it is trimmed
+    # and a blank string for the second roadname.
+    # Otherwise, try returning both.
+    # If that doesn't work, return two blank strings.
+    ## TODO: Add functionality to handle the pipe and whichever other character DASC
+    ## uses here besides Ampersand.
+    try:
+        commaSplitList = fullMatchAddr.split(',')
+        commaSplitPart1 = commaSplitList[0]
+        if fullMatchAddr.find('&') == -1:
+            parsedRoadName1 = commaSplitPart1.strip()
+            parsedRoads = list(parsedRoadName1, '')
+            return parsedRoads
+        else:
+            ampSplitList = commaSplitPart1.split('&')
+            ampSplitPart1 = ampSplitList[0]
+            parsedRoadName1 = ampSplitPart1.strip()
+            ampSplitPart2 = ampSplitList[1]
+            parsedRoadName2 = ampSplitPart2.strip()
+            parsedRoads = list(parsedRoadName1, parsedRoadName2)
+            return parsedRoads
+    except:
+        print("Something went wrong in the ParseMatchAddr function.")
+        parsedRoads = list('', '')
+        return parsedRoads
 
 
 def offsetdirectioncaller(intersectPoints, aliasLocation, centerlineLocation, offsetPointOutput, useKDOTIntersect):
     optionsInstance = InitalizeCurrentPathSettings()
     optionsInstance = UpdateOptionsWithParameters(optionsInstance)
     
-    optionsInstance.gdbPath = getGDBLocationFromFC(intersectPoints)
+    optionsInstance.gdbPath = returnGDBOrSDEPath(intersectPoints)
     optionsInstance.accidentDataAtIntersections = intersectPoints
     optionsInstance.aliasTable = aliasLocation
     optionsInstance.roadsFeaturesLocation = centerlineLocation
@@ -873,6 +805,226 @@ def offsetdirectioncaller(intersectPoints, aliasLocation, centerlineLocation, of
     SetupOutputFeatureClass(optionsInstance)
     print 'Starting the offset process...'
     OffsetDirectionMatrix2(optionsInstance)
+
+
+# Need to pass it a pre-selected feature class of centerlines
+# Need to review how it uses the aliasLocation and see if there is an
+# easier way to get that to work with the pre-selected feature class
+# of centerlines.
+# Also need to pass in a preselected subset of crash records.
+# - Up to 50k for the defined area.
+# Can these be done with an in_memory dataset from the calling
+# script or do they have to be on-disk or inline inside the
+# executing script?
+# If they need to be inline, it would be possible to add the
+# necessary details to this script to handle them.
+def continuousoffsetcaller(intersectPoints, centerlineLocation, aliasLocation, offsetPointOutput, useKDOTIntersect,
+        outputSRToUse, roadwayTableGCIDToUse, aliasTableGCIDToUse, aliasTableRoadNameFields, additionalRoadNameColumnBaseName, offsetPointsOutputUniqueKey):
+    optionsInstance = InitalizeCurrentPathSettings()
+    optionsInstance = UpdateOptionsWithParameters(optionsInstance)
+    
+    optionsInstance.gdbPath = returnGDBOrSDEPath(intersectPoints)
+    optionsInstance.accidentDataAtIntersections = intersectPoints
+    optionsInstance.roadsFeaturesLocation = centerlineLocation
+    optionsInstance.aliasTable = aliasLocation
+    optionsInstance.accidentDataWithOffsetOutput = offsetPointOutput
+    optionsInstance.useKDOTFields = useKDOTIntersect
+    optionsInstance.outputSR = outputSRToUse
+    optionsInstance.aliasTableGCIDForJoining = aliasTableGCIDToUse
+    optionsInstance.roadwayTableGCIDForJoining = roadwayTableGCIDToUse
+    optionsInstance.aliasTableRoadNameFields = aliasTableRoadNameFields
+    optionsInstance.flattenedAliasColumnBaseName = additionalRoadNameColumnBaseName
+    optionsInstance.fromContinuousCaller = True
+    optionsInstance.offsetPointsUniqueKey = offsetPointsOutputUniqueKey
+    
+    SetupOutputFeatureClass(optionsInstance)
+    print 'Starting the offset process...'
+    OffsetDirectionMatrix2(optionsInstance)
+
+
+def insertIntoUnfilteredOutputLocation(inputLocation, outputLocation, transferFields):
+    newCursor = daSearchCursor(inputLocation, transferFields)
+    transferList = list()
+    for cursorItem in newCursor:
+        transferList.append(cursorItem)
+    
+    try:
+        del newCursor
+    except:
+        pass
+    
+    newCursor = daInsertCursor(outputLocation, transferFields)
+    for transferItem in transferList:
+        newCursor.Insert(curstransferItemorItem)
+    
+    try:
+        del newCursor
+    except:
+        pass
+
+
+def buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, whereClauseFlag, calledFromContinuous):
+    singlePartOffsetFeaturesList = list()
+    for geocodedAccident in geocodedAccidentsList:
+        # Create a point here with the x & y from the geocodedAccident,
+        # add the coordinate system, OBJECTID, and AccidentID
+        # from the geocodedAccident layer.
+        # Then, create a buffer with it.
+        
+        #if geocodedAccident[2] is not None and geocodedAccident[3] is not None:
+        tempPoint = Point(geocodedAccident[2], geocodedAccident[3])
+        #print "\t " + str(tempPoint.X) + ", " + str(tempPoint.Y)
+        tempPointGeometry = PointGeometry(tempPoint, descSpatialReference)
+        accidentDistanceOffset = geocodedAccident[7]
+        accidentClusterTolerance = 2
+        
+        ###########################################################################
+        ## TODO: Add alternate names to a copy of the road centerline features
+        ## and allow the where clause to select those alternate names as well
+        ## i.e.:
+        ##
+        ##          streetWhereClause = (""" "RD" = '""" + firstRoadName  + """'""" + """ OR """ +
+        ##                                  """ "RD_ALT_NAME_1" = '""" + firstRoadName  + """'""" + """ OR """ +
+        ##                                  """ "RD_ALT_NAME_2" = '""" + firstRoadName  + """'""" + """ OR """ +
+        ##                                  """ "KDOT_ROUTENAME" = '""" + firstRoadName + """'""" + """ OR """ +
+        ##                                  """ "RD" = '""" + secondRoadName  + """'""" + """ OR """
+        ##                                  """ "RD_ALT_NAME_1" = '""" + secondRoadName  + """'""" + """ OR """ +
+        ##                                  """ "RD_ALT_NAME_2" = '""" + secondRoadName  + """'""" + """ OR """ +
+        ##                                  """ "KDOT_ROUTENAME" = '""" + secondRoadName + """'""")                        
+        ##
+        ## Or similar. Get the alternate names for each county from the StreetsCounty_Int
+        ## dataset, or a better one, if you can find one.
+        ###########################################################################
+        
+        if whereClauseFlag == True:
+            try:
+                #####################
+                # Offsetting while using a WhereClause follows:
+                #####################
+                if accidentDistanceOffset is not None: # In Python it's None, whereas in an ArcGIS table it's <null>
+                    
+                    accidentDistanceOffset = int(accidentDistanceOffset)
+                    if accidentDistanceOffset != 0 and accidentDistanceOffset >= 5:
+                        
+                        Buffer_analysis(tempPointGeometry, intermediateAccidentBuffer, accidentDistanceOffset)
+                        
+                        firstRoadName = str(geocodedAccident[5])
+                        firstRoadName = firstRoadName.upper()
+                        ###secondRoadName = str(geocodedAccident[8])
+                        ###secondRoadName = secondRoadName.upper()
+                        
+                        parsedRoadNamesList = ParseMatchAddr(geocodedAccident[9])
+                        secondRoadName = parsedRoadNamesList[0]
+                        secondRoadName = secondRoadName.upper()
+                        thirdRoadName = parsedRoadNamesList[1]
+                        thirdRoadName = thirdRoadName.upper()
+                        
+                        roadNameColumns = ['']
+                        
+                        if calledFromContinuous == False:
+                            roadNameColumns = ["RD", "KDOT_ROUTENAME"]
+                        else:
+                            roadNameColumns = ["RD", "LABEL", "STP_RD"] # The flattened alias columns get appended to these.
+                            aliasColumnsBaseName = offsetOptions.flattenedAliasColumnBaseName
+                            aliasColumnsCount = offsetOptions.numberOfAliasNameColumns
+                            roadAliasNameColumns = GenerateFlatTableColumnNames(aliasColumnsBaseName, aliasColumnsCount)
+                            roadNameColumns += roadAliasNameColumns
+                        
+                        roadNameValues = [firstRoadName, secondRoadName, thirdRoadName]  
+                        streetWhereClause = generateWhereClause(roadNameColumns, roadNameValues)
+                        SelectLayerByAttribute_management(roadsAsFeatureLayer, "NEW_SELECTION", streetWhereClause)
+                        
+                        selectionCount = str(GetCount_management(roadsAsFeatureLayer))
+                        
+                        if int(selectionCount) != 0:
+                            featuresToIntersect = [roadsAsFeatureLayer, intermediateAccidentBuffer]
+                            Intersect_analysis(featuresToIntersect, intermediateAccidentIntersect, "ALL", accidentClusterTolerance, "POINT")
+                            
+                            if  int(str(GetCount_management(intermediateAccidentIntersect))) > 0:
+                                MultipartToSinglepart_management(intermediateAccidentIntersect, intermediateAccidentIntersectSinglePart)
+                                
+                                singlePartsCursor = SearchCursor(intermediateAccidentIntersectSinglePart, ['SHAPE@XY'])
+                                for singlePart in singlePartsCursor:
+                                    singlePartListItem = [singlePart[0], geocodedAccident[2], geocodedAccident[3], geocodedAccident[4],
+                                                               geocodedAccident[6], geocodedAccident[0]]
+                                    singlePartOffsetFeaturesList.append(singlePartListItem)
+                                
+                                try:
+                                    del singlePartsCursor
+                                except:
+                                    pass
+                            else:
+                                pass
+                        else:
+                            pass # Zero road segments selected. Will not attempt to offset.
+                    else:
+                        pass #AT_ROAD_DIST_FEET is 0. Handled by the lowDistanceOrNullIsOffset function.
+                else:
+                    pass #AT_ROAD_DIST_FEET is null. Handled by the lowDistanceOrNullIsOffset function.
+            except:
+                print "WARNING:"
+                print "An error occurred which prevented the accident point with Acc_Key: " + str(geocodedAccident[4])
+                print "from being buffered and/or offset properly."
+        
+        elif whereClauseFlag == False:
+            try:
+                #####################
+                # Offsetting while not using a WhereClause follows:
+                #####################
+                
+                if accidentDistanceOffset is not None:
+                    accidentDistanceOffset = int(accidentDistanceOffset)
+                    if accidentDistanceOffset != 0 and accidentDistanceOffset >= 5:
+                        accidentDistanceOffset = int(accidentDistanceOffset)
+                        
+                        Buffer_analysis(tempPointGeometry, intermediateAccidentBuffer, accidentDistanceOffset)
+                        
+                        featuresToIntersect = [roadsAsFeatureLayer, intermediateAccidentBuffer]
+                        Intersect_analysis(featuresToIntersect, intermediateAccidentIntersect, "ALL", accidentClusterTolerance, "POINT")
+                        if  int(str(GetCount_management(intermediateAccidentIntersect))) > 0:
+                            MultipartToSinglepart_management(intermediateAccidentIntersect, intermediateAccidentIntersectSinglePart)
+                            
+                            singlePartsCursor = SearchCursor(intermediateAccidentIntersectSinglePart, ['SHAPE@XY'])
+                            for singlePart in singlePartsCursor:
+                                singlePartListItem = [singlePart[0], geocodedAccident[2], geocodedAccident[3], geocodedAccident[4],
+                                                           geocodedAccident[6], geocodedAccident[0]]
+                                singlePartOffsetFeaturesList.append(singlePartListItem)
+                            
+                            try:
+                                del singlePartsCursor
+                            except:
+                                pass
+                        else:
+                            pass
+                    else:
+                        pass #AT_ROAD_DIST_FEET is 0. Handled by the lowDistanceOrNullIsOffset function.
+                else:
+                    pass #AT_ROAD_DIST_FEET is null. Handled by the lowDistanceOrNullIsOffset function.
+            except:
+                print "WARNING:"
+                print "An error occurred which prevented the accident point with Acc_Key: " + str(geocodedAccident[4])
+                print "from being buffered and/or offset properly."
+        
+        else:
+            pass
+            #print 'Please set the whereClauseFlag to either (boolean) True or False.'
+    return singlePartOffsetFeaturesList
+
+
+def generateWhereClause(listOfColumnNames, listOfPotentialValues):
+    generatedWhereClause = """"""
+    
+    generatedExpressionCount = 0
+    for columnNameItem in listOfColumnNames:
+        for potentialValueItem in listofPotentialValues:
+            if generatedExpressionCount != 0:
+                generatedWhereClause += """ OR """ + """ \"""" + columnNameItem + """\" = '""" + potentialValueItem + """'"""
+                generatedExpressionCount += 1
+            else:
+                generatedWhereClause += """ \"""" + columnNameItem + """\" = '""" + potentialValueItem + """'"""
+                generatedExpressionCount += 1
+    
+    return generatedWhereClause
 
 
 if __name__ == "__main__":

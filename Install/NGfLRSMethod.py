@@ -93,12 +93,13 @@ charsubs = {'B': '1', 'F': '1', 'P': '1', 'V': '1',
             'N': '5', 'R': '6', '.':''}
 
 
-## //TODO: Add a function decorator that takes the rest of the functions and
-## places lyr = cps.lyr
+## //TODO: Add a function decorator that takes the rest of the functions
+## besides InitalizeCurrentPathSettings and places
+## lyr = cps.lyr
 ## Alias = cps.Alias
 ## DOTRoadsGDB = cps.DOTRoadsGDB
 ## gdb = cps.gdbPath
-## in them.
+## in all of them.
 
 
 def InitalizeCurrentPathSettings():
