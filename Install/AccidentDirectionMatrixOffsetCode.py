@@ -15,10 +15,12 @@
 #    when the At_Road_Distance_Feet or KDOT equivalent is Null or between
 #    0 to 1 Feet, i.e. 0.001.
 
+import gc
 import math
 import os
 import sys
 import time
+import traceback
 from arcpy import (AddXY_management, AddJoin_management, AddField_management, AddFieldDelimiters, AddMessage, # @UnusedImport
                    Append_management, Buffer_analysis, CopyFeatures_management, Delete_management, Describe, # @UnusedImport 
                    env, Exists, ExecuteError, # @UnusedImport 
@@ -33,6 +35,13 @@ try:
     from flattenTableJoinOntoTable import tableOntoTableCaller, GenerateFlatTableColumnNames
 except:
     print ("Could not import the tableOntoTableCaller or GenerateFlatTableColumnNames function from flattenTableJoinOntoTable.py.")
+
+# Scratch data locations
+intermediateAccidentBuffer = r'in_memory\intermediateAccidentBuffer'
+intermediateAccidentIntersect = r'in_memory\intermediateAccidentIntersect'
+intermediateAccidentIntersectSinglePart = r'in_memory\intermediateAccidentIntersectSinglePart'
+
+roadsAsFeatureLayer = 'NonStateRoadsFeatureLayer'
 
 
 def UpdateOptionsWithParameters(optionsObject):
@@ -216,11 +225,6 @@ def OffsetDirectionMatrix2(offsetOptions):
     featuresWithXY = 'geocodedWithXY'
     geocodedLocXY = r'in_memory\geocodedFeatures_Loc_XY' # Changed this to an in_memory location also.
     
-    # Scratch data locations
-    intermediateAccidentBuffer = r'in_memory\intermediateAccidentBuffer'
-    intermediateAccidentIntersect = r'in_memory\intermediateAccidentIntersect'
-    intermediateAccidentIntersectSinglePart = r'in_memory\intermediateAccidentIntersectSinglePart'
-    
     geocodedFeatureDesc = Describe(geocodedFeatures)
     descSpatialReference = geocodedFeatureDesc.spatialReference
     del geocodedFeatureDesc
@@ -231,7 +235,7 @@ def OffsetDirectionMatrix2(offsetOptions):
     CopyFeatures_management(featuresWithXY, geocodedLocXY)
     AddXY_management(geocodedLocXY)
     
-    roadsAsFeatureLayer = 'NonStateRoadsFeatureLayer'
+    
     
     # Check if the KDOT_ROUTENAME field was already added to the roads table.
     # If not, add it.
@@ -282,14 +286,25 @@ def OffsetDirectionMatrix2(offsetOptions):
     except:
         pass
     
+    #Testing to see if it helps the cursors keep working.
+    gc.collect()
+    
     # Replacement function for having the code inline here
     # since I needed to be able to specify more options.
-    singlePartOffsetCrashesList = buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, whereClauseFlag, fromContinuous)
+    singlePartOffsetCrashesList = buildSinglePartOffsetFeaturesFromGeocodedCrashes(offsetOptions, geocodedAccidentsList, whereClauseFlag, fromContinuous, descSpatialReference)
     
-    removeDuplicatesFromSinglePartFeatures(singlePartOffsetCrashesList)
+    #Set the unique key field for use when removing duplicates.
+    currentUniqueKeyField = 'ACCIDENT_KEY' # Default
+    if offsetOptions.offsetPointsUniqueKey is None:
+        pass
+    else:
+        currentUniqueKeyField = offsetOptions.offsetPointsUniqueKey
+    
+    removeDuplicatesFromSinglePartFeatures(offsetOptions, singlePartOffsetCrashesList, outputWithOffsetLocations, currentUniqueKeyField)
 
 
-def removeDuplicatesFromSinglePartFeatures(singlePartFeauresList):
+def removeDuplicatesFromSinglePartFeatures(offsetOptions, singlePartFeauresList, offsetOutputFC, uniqueKeyField):
+    print("Removing the duplicates from the single part features list and updating the features in: " + str(offsetOutputFC) + ".")
     offsetDictionaryByAccidentKey = dict()
     listContainer = list()
     
@@ -299,7 +314,7 @@ def removeDuplicatesFromSinglePartFeatures(singlePartFeauresList):
     
     # Group the rows by accident_key for further analysis,
     # and add them to the dictionary/list/list data structure.
-    
+    print("Adding the singlePartOffsetItems to the offsetDictionaryByAccidentKey.")
     for singlePartOffsetItem in singlePartFeauresList:
         if singlePartOffsetItem[3] in offsetDictionaryByAccidentKey.keys():
             listContainer = offsetDictionaryByAccidentKey[singlePartOffsetItem[3]]
@@ -312,6 +327,7 @@ def removeDuplicatesFromSinglePartFeatures(singlePartFeauresList):
     
     updateListValues = list()
     
+    print("Going through the offsetDictionaryByAccidentKey and selecting rows to add to the updateListValues.")
     for accidentKey in offsetDictionaryByAccidentKey.keys():
         # accidentKey will be a unique accident key from the table
         listContainer = offsetDictionaryByAccidentKey[accidentKey]
@@ -327,15 +343,43 @@ def removeDuplicatesFromSinglePartFeatures(singlePartFeauresList):
         except:
             pass
     
-    accidentUpdateCursorFields = ['ACCIDENT_KEY', 'Shape@XY', 'isOffset']
+    accidentUpdateCursorFields = [uniqueKeyField, 'Shape@XY', 'isOffset']
     
-    accidentUpdateCursor = UpdateCursor(outputWithOffsetLocations, accidentUpdateCursorFields)
+    # To speed this up, implement a dictionary that will allow lookup
+    # of the cursorItem[0] in the updateList instead of doing
+    # two for loops.
+    #New, needs testing, but should be faster.
+    updateDictValues = dict()
+    for updateListValueItem in updateListValues:
+        if updateListValueItem[0] is not None:
+            updateDictValues[updateListValueItem[0]] = updateListValueItem
+        else:
+            print("updateListValueItem[0] is None. Will not add to the dictionary.")
+    
+    print("Updating the offsetOutputFC with information from the updateListValues.")
+    accidentUpdateCursor = UpdateCursor(offsetOutputFC, accidentUpdateCursorFields)
     for cursorItem in accidentUpdateCursor:
+        #New, needs testing, but should be faster.
+        updateListItem = updateDictValues.get(cursorItem[0], None)
+        if updateListItem is not None:
+            if str(cursorItem[2]) == 'NormalOffset' or str(cursorItem[2]) == 'ZeroDistanceOffset':    # Don't make any changes if true.
+                AddMessage('The accident point with Acc_Key: ' + str(cursorItem[0]) + ' is already offset.')
+            else: # Otherwise, offset the point.
+                editableCursorItem = list(cursorItem)
+                #AddMessage('Found a matching cursorItem with an Accident_Key of ' + str(cursorItem[0]) + ".")
+                editableCursorItem[1] = (updateListItem[1], updateListItem[2])
+                editableCursorItem[2] = updateListItem[3]
+                #AddMessage(str(editableCursorItem))
+                accidentUpdateCursor.updateRow(editableCursorItem)
+        else:
+            print("The updateListItem was None, will not update the cursorItem.")
+        #Older, slower.
+        '''
         for updateListItem in updateListValues:
             if cursorItem[0] == updateListItem[0]:
-                if str(cursorItem[2]) == 'NormalOffset':    # Don't make any changes if true.
+                if str(cursorItem[2]) == 'NormalOffset' or str(cursorItem[2]) == 'ZeroDistanceOffset':    # Don't make any changes if true.
                     AddMessage('The accident point with Acc_Key: ' + str(cursorItem[0]) + ' is already offset.')
-                else:                                       # Otherwise, offset the point.
+                else: # Otherwise, offset the point.
                     editableCursorItem = list(cursorItem)
                     #AddMessage('Found a matching cursorItem with an Accident_Key of ' + str(cursorItem[0]) + ".")
                     editableCursorItem[1] = (updateListItem[1], updateListItem[2])
@@ -346,14 +390,20 @@ def removeDuplicatesFromSinglePartFeatures(singlePartFeauresList):
             else:
                 pass # This will always happen when updateListItem has a value of -1 in the 0th position,
                 # since that is not a valid Acc_Key.
+        '''
+    try:
+        del accidentUpdateCursor
+    except:
+        print("Could not delete the accidentUpdateCursor.")
     
     # Add an "isOffset" value of 'ZeroDistanceOffset' that is used when the the offset
     # distance is less than 5 ft or if the distance is null which allows
     # the crash to be considered to be correctly offset at the intersection.
-    lowDistanceOrNullIsOffset(offsetOptions)
+    lowDistanceOrNullIsOffset(offsetOptions, uniqueKeyField)
 
 
-def lowDistanceOrNullIsOffset(offsetOptions):
+def lowDistanceOrNullIsOffset(offsetOptions, uniqueKeyField):
+    print("Adding ZeroDistanceOffsets to the offsetOptions.accidentDataWithOffsetOutput FC.")
     try:
         accidentDataToUpdate = offsetOptions.accidentDataWithOffsetOutput
         
@@ -362,9 +412,9 @@ def lowDistanceOrNullIsOffset(offsetOptions):
         accidentUpdateCursorFields = [None]
         
         if offsetOptions.useKDOTFields == True:
-            accidentUpdateCursorFields = ['ACCIDENT_KEY', offsetOptions.KDOTXYFieldList[7], 'isOffset']
+            accidentUpdateCursorFields = [uniqueKeyField, offsetOptions.KDOTXYFieldList[7], 'isOffset']
         else:
-            accidentUpdateCursorFields = ['ACCIDENT_KEY', offsetOptions.NonKDOTXYFieldList[7], 'isOffset']
+            accidentUpdateCursorFields = [uniqueKeyField, offsetOptions.NonKDOTXYFieldList[7], 'isOffset']
         
         accidentUpdateCursor = UpdateCursor(accidentDataToUpdate, accidentUpdateCursorFields)
         for cursorItem in accidentUpdateCursor:
@@ -383,6 +433,12 @@ def lowDistanceOrNullIsOffset(offsetOptions):
                     pass
             except:
                 print("Something went wrong in the lowDistanceOrNullIsOffset update cursor.")
+        
+        try:
+            del accidentUpdateCursor
+        except:
+            print("Could not delete the accidentUpdateCursor.")
+        
     except:
         print("Something went wrong in the lowDistanceOrNullIsOffset function.")
 
@@ -407,7 +463,7 @@ def SetupOutputFeatureClass(outputFeatureClassOptions):
     if Exists(outputWithOffsetLocations):
         AddMessage("The output table with offset information already exists.")
         AddMessage("Will not copy over it.")
-        
+    
     else:
         print("Rebuilding the output table...")
         print("Attempting to use: " + outputWithOffsetLocations + " as the target FC.")        
@@ -775,7 +831,7 @@ def ParseMatchAddr(fullMatchAddr):
         commaSplitPart1 = commaSplitList[0]
         if fullMatchAddr.find('&') == -1:
             parsedRoadName1 = commaSplitPart1.strip()
-            parsedRoads = list(parsedRoadName1, '')
+            parsedRoads = list((parsedRoadName1, ''))
             return parsedRoads
         else:
             ampSplitList = commaSplitPart1.split('&')
@@ -783,11 +839,11 @@ def ParseMatchAddr(fullMatchAddr):
             parsedRoadName1 = ampSplitPart1.strip()
             ampSplitPart2 = ampSplitList[1]
             parsedRoadName2 = ampSplitPart2.strip()
-            parsedRoads = list(parsedRoadName1, parsedRoadName2)
+            parsedRoads = list((parsedRoadName1, parsedRoadName2))
             return parsedRoads
     except:
         print("Something went wrong in the ParseMatchAddr function.")
-        parsedRoads = list('', '')
+        parsedRoads = list(('', ''))
         return parsedRoads
 
 
@@ -840,6 +896,8 @@ def continuousoffsetcaller(intersectPoints, centerlineLocation, aliasLocation, o
     SetupOutputFeatureClass(optionsInstance)
     print 'Starting the offset process...'
     OffsetDirectionMatrix2(optionsInstance)
+    print("The continuousoffsetcaller function has completed.")
+    print("Returning control to the calling function or script.")
 
 
 def insertIntoUnfilteredOutputLocation(inputLocation, outputLocation, transferFields):
@@ -863,8 +921,20 @@ def insertIntoUnfilteredOutputLocation(inputLocation, outputLocation, transferFi
         pass
 
 
-def buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, whereClauseFlag, calledFromContinuous):
+def buildSinglePartOffsetFeaturesFromGeocodedCrashes(offsetOptions, geocodedAccidentsList, whereClauseFlag, calledFromContinuous, inputSpatialReference):
+    print("Building the single part offset features from geocoded crashes.")
     singlePartOffsetFeaturesList = list()
+    roadNameColumns = ['']
+    
+    if calledFromContinuous == False:
+        roadNameColumns = ["RD", "KDOT_ROUTENAME"]
+    else:
+        roadNameColumns = ["RD", "LABEL", "STP_RD"] # The flattened alias column names get appended to these.
+        aliasColumnsBaseName = offsetOptions.flattenedAliasColumnBaseName
+        aliasColumnsCount = offsetOptions.numberOfAliasNameColumns
+        roadAliasNameColumns = GenerateFlatTableColumnNames(aliasColumnsBaseName, aliasColumnsCount)
+        roadNameColumns += roadAliasNameColumns
+    
     for geocodedAccident in geocodedAccidentsList:
         # Create a point here with the x & y from the geocodedAccident,
         # add the coordinate system, OBJECTID, and AccidentID
@@ -874,7 +944,7 @@ def buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, wher
         #if geocodedAccident[2] is not None and geocodedAccident[3] is not None:
         tempPoint = Point(geocodedAccident[2], geocodedAccident[3])
         #print "\t " + str(tempPoint.X) + ", " + str(tempPoint.Y)
-        tempPointGeometry = PointGeometry(tempPoint, descSpatialReference)
+        tempPointGeometry = PointGeometry(tempPoint, inputSpatialReference)
         accidentDistanceOffset = geocodedAccident[7]
         accidentClusterTolerance = 2
         
@@ -905,7 +975,7 @@ def buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, wher
                     
                     accidentDistanceOffset = int(accidentDistanceOffset)
                     if accidentDistanceOffset != 0 and accidentDistanceOffset >= 5:
-                        
+                        ## Failing here due to not having the name for intermediateAccidentBuffer
                         Buffer_analysis(tempPointGeometry, intermediateAccidentBuffer, accidentDistanceOffset)
                         
                         firstRoadName = str(geocodedAccident[5])
@@ -919,26 +989,30 @@ def buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, wher
                         thirdRoadName = parsedRoadNamesList[1]
                         thirdRoadName = thirdRoadName.upper()
                         
-                        roadNameColumns = ['']
-                        
-                        if calledFromContinuous == False:
-                            roadNameColumns = ["RD", "KDOT_ROUTENAME"]
-                        else:
-                            roadNameColumns = ["RD", "LABEL", "STP_RD"] # The flattened alias columns get appended to these.
-                            aliasColumnsBaseName = offsetOptions.flattenedAliasColumnBaseName
-                            aliasColumnsCount = offsetOptions.numberOfAliasNameColumns
-                            roadAliasNameColumns = GenerateFlatTableColumnNames(aliasColumnsBaseName, aliasColumnsCount)
-                            roadNameColumns += roadAliasNameColumns
-                        
                         roadNameValues = [firstRoadName, secondRoadName, thirdRoadName]  
                         streetWhereClause = generateWhereClause(roadNameColumns, roadNameValues)
                         SelectLayerByAttribute_management(roadsAsFeatureLayer, "NEW_SELECTION", streetWhereClause)
                         
                         selectionCount = str(GetCount_management(roadsAsFeatureLayer))
                         
+                        if Exists(intermediateAccidentIntersect):
+                            try:
+                                Delete_management(intermediateAccidentIntersect)
+                            except:
+                                pass
+                        else:
+                            pass
+                        
                         if int(selectionCount) != 0:
                             featuresToIntersect = [roadsAsFeatureLayer, intermediateAccidentBuffer]
                             Intersect_analysis(featuresToIntersect, intermediateAccidentIntersect, "ALL", accidentClusterTolerance, "POINT")
+                            
+                            time.sleep(0.15) # Wait a moment for the FC to settle.
+                            # If it doesn't exist despite having been just created, then skip to the next record.
+                            if not (Exists(intermediateAccidentIntersect)): 
+                                continue
+                            else:
+                                pass
                             
                             if  int(str(GetCount_management(intermediateAccidentIntersect))) > 0:
                                 MultipartToSinglepart_management(intermediateAccidentIntersect, intermediateAccidentIntersectSinglePart)
@@ -965,6 +1039,7 @@ def buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, wher
                 print "WARNING:"
                 print "An error occurred which prevented the accident point with Acc_Key: " + str(geocodedAccident[4])
                 print "from being buffered and/or offset properly."
+                print(traceback.format_exc())
         
         elif whereClauseFlag == False:
             try:
@@ -979,8 +1054,24 @@ def buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, wher
                         
                         Buffer_analysis(tempPointGeometry, intermediateAccidentBuffer, accidentDistanceOffset)
                         
+                        if Exists(intermediateAccidentIntersect):
+                            try:
+                                Delete_management(intermediateAccidentIntersect)
+                            except:
+                                pass
+                        else:
+                            pass
+                        
                         featuresToIntersect = [roadsAsFeatureLayer, intermediateAccidentBuffer]
                         Intersect_analysis(featuresToIntersect, intermediateAccidentIntersect, "ALL", accidentClusterTolerance, "POINT")
+                        
+                        time.sleep(0.15) # Wait a moment for the FC to settle.
+                        # If it doesn't exist despite having been just created, then skip to the next record.
+                        if not (Exists(intermediateAccidentIntersect)):
+                            continue
+                        else:
+                            pass
+                        
                         if  int(str(GetCount_management(intermediateAccidentIntersect))) > 0:
                             MultipartToSinglepart_management(intermediateAccidentIntersect, intermediateAccidentIntersectSinglePart)
                             
@@ -1004,6 +1095,7 @@ def buildSinglePartOffsetFeaturesFromGeocodedCrashes(geocodedAccidentsList, wher
                 print "WARNING:"
                 print "An error occurred which prevented the accident point with Acc_Key: " + str(geocodedAccident[4])
                 print "from being buffered and/or offset properly."
+                print(traceback.format_exc())
         
         else:
             pass
@@ -1016,7 +1108,7 @@ def generateWhereClause(listOfColumnNames, listOfPotentialValues):
     
     generatedExpressionCount = 0
     for columnNameItem in listOfColumnNames:
-        for potentialValueItem in listofPotentialValues:
+        for potentialValueItem in listOfPotentialValues:
             if generatedExpressionCount != 0:
                 generatedWhereClause += """ OR """ + """ \"""" + columnNameItem + """\" = '""" + potentialValueItem + """'"""
                 generatedExpressionCount += 1

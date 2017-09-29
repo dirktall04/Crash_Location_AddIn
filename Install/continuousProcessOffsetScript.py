@@ -1,23 +1,19 @@
 #!/usr/bin/env/ python
 #continousProcessOffsetScript.py
 # Created by dirktall04 on 2017-07-26
+# Updated by dirktall04 on 2017-09-27
 # Large portions of this code were adapted from:
 # AccidentDirectionMatrixOffsetCode.py
 
-# Rebuild the accident offset script to use a fixed source of Roadway data (NG911) and just select it by District.
+# Rebuild the accident offset script to use a fixed source of Roadway data (NG911).
+# 2017-09-27 update removed several in_memory\* feature classes in an attempt
+# to reduce memory consumption as the script seems to be running into
+# problems due to a lack of available memory.
 
-# Can select geolocated crash points based on an intersection with District.
-# Then can select roadways based on an intersection with a buffer around each county (2 mi).
-# That should allow for offsetting of points up to 2 mi away from the intersection points
-# and do so without causing uncertainty about which PSAPs are where in relation to which
-# counties.
 
-# See what happens if you try to select geolocated crash points based on
-# an intersection with the Admin Districts. Then you would only need to have 6
-# selections or outer loops and this could even be pushed to 6 cores or
-# 6 machines, if need be, in the future.
-
+import gc
 import os
+import pyproj
 import random
 from arcpy import (AddField_management, CalculateField_management, ConvertTimeField_management,
     CopyFeatures_management, CopyRows_management, CreateFeatureclass_management, Delete_management,
@@ -25,6 +21,7 @@ from arcpy import (AddField_management, CalculateField_management, ConvertTimeFi
     JoinField_management, MakeFeatureLayer_management, SelectLayerByAttribute_management,
     SelectLayerByLocation_management, Sort_management, SpatialReference, TruncateTable_management)
 from arcpy.da import (SearchCursor as daSearchCursor)  # @UnresolvedImport
+from arcpy.mapping import (AddLayer, MapDocument, ListDataFrames, ListLayers)
 from AccidentDirectionMatrixOffsetCode import continuousoffsetcaller
 # Doesn't seem like the daily vs overall property will need to be implemented.
 ##from lastRun import dailyOrOverall
@@ -32,6 +29,11 @@ from AccidentDirectionMatrixOffsetCode import continuousoffsetcaller
 from pathFunctions import (returnGDBOrSDEPath,
     returnFeatureClass, returnGDBOrSDEName)
 
+
+# I've phased out most of the feature classes and tables that were written to in_memory.
+# The script seemed to be having trouble with all the space that they were taking up.
+# Also added some calls to gc.collect() in this script and
+# the AccidentDirectionMatrixOffsetCode script.
 env.overwriteOutput = True
 newSelection = "NEW_SELECTION"
 maxCrashPointsToProcess = 5000
@@ -49,20 +51,13 @@ additionalNameColumnBaseName = "Alias_Road_Name_"
 # the previous features will be used. There should be a max
 # time limit on this, however it is not yet implemented.
 
-##adminDistrictsLocation = r'D:\SCHED\OffsetCrashes\readonly@sdeprod.sde\SHARED.KDOT_ADMIN_DISTRICTS'
-# For testing:
-#adminDistrictsLocation = r'D:\SCHED\OffsetCrashes\readonly@sdeprod.sde\SHARED.KDOT_MASA_DISTRICTS'
-##adminDistrictsLocation = r'C:\GIS\SCHED\OffsetCrashes\readonly@sdeprod.sde\SHARED.KDOT_ADMIN_DISTRICTS'
-##inMemAdminDistricts = r'in_memory\adminDistricts'
-##adminDistrictsLayer = 'adminDistrictsAsALayer'
-
 gdbForStaging = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb'
 offsetProjectionToUse = r'D:\SCHED\OffsetCrashes\NAD 1983 Decimal Degrees.prj'
 
 chasmNG911Roadways = r'D:\CHASM\CHASM.sde\KDOT.ROADCENTERLINE_NG911'
 pulledNG911Roadways = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\pu_NG911Roadways'
 stagedNG911Roadways = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\sg_NG911Roadways'
-inMemNG911Roadways = r"in_memory\NG911Roadways"
+##inMemNG911Roadways = r"in_memory\NG911Roadways"
 ##ng911RoadwaysLayer = 'ng911RoadwaysAsALayer' # Might not be needed.
 ##inMemRoadwaysSubset = r'in_memory\NG911RoadwaysSubset'
 
@@ -70,7 +65,7 @@ chasmAliasTable = r'D:\CHASM\CHASM.sde\KDOT.ROADALIAS_NG911'
 pulledAliasTable = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\pu_AliasTable'
 stagedAliasTable = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\sg_AliasTable'
 # Will have to see if this needs special loading into the data frame.
-inMemAliasTable = r'in_memory\AliasTable'
+##inMemAliasTable = r'in_memory\AliasTable'
 
 # Since the logic for the pulled & staged tables doesn't apply to the Daily
 # geocode, the only crashes that will be pulled & staged will be from the Overall.
@@ -81,7 +76,7 @@ chasmOutputCrashPoints = r'D:\CHASM\CHASM.sde\KDOT.KGS_CRASH_OUTPUT'
 pulledCrashPoints = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\pu_CrashPoints'
 stagedCrashPoints = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\sg_CrashPoints'
 inMemCrashPoints = r'in_memory\CrashPoints'
-inMemCrashPointsLayer = 'CrashPointsLayer'
+crashPointsLayer = 'CrashPointsLayer'
 inMemCrashPointsSubset = r'in_memory\CrashPointsSubset'
 ##inMemCrashPointsSubsetLayer = 'inMemCrashPointsSubsetLayer'
 ##inMemCrashPointsReducedSubset = r'in_memory\CrashPointsReducedSubset'
@@ -95,21 +90,27 @@ useKDOTIntersect = 'True'
 allKDOTCrashRecords = r'D:\SCHED\OffsetCrashes\readonly@kcarsprd.sde\KCARS.GIS_GEOCODE_ACC_V' # Local accident data source.
 pulledCrashRecords = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\pu_CrashRecords'
 stagedCrashRecords = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\sg_CrashRecords'
-inMemCrashRecords = r'in_memory\CrashRecords'
+###inMemCrashRecords = r'in_memory\CrashRecords'
 sortedInMemCrashRecords = r"in_memory/CrashRecordsSorted" # Fails now when used in anything with the value r"in_memory\SortedCrashRecords"
 concatAccidentKey = 'ACCIDENT_UNIQUE_KEY'
 
 
-testingTempOutputLocation = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\Temp_OffsetOutputs'
-testingOutputLocation = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\OffsetOutput'
+testingTempOutputLocation = r'D:\SCHED\OffsetCrashes\crashOffsetTemp.gdb\Temp_OffsetOutputs'
+testingOutputLocation = r'D:\SCHED\OffsetCrashes\crashOffsetOutput.gdb\OffsetOutput'
 productionTempOutputLocation = r'D:\SCHED\OffsetCrashes\geo@CrashLocation.sde\CrashLocation.GEO.TEMP_ACC_OFFSET_PTS_ALL'
 productionOutputLocation = r'D:\SCHED\OffsetCrashes\geo@CrashLocation.sde\CrashLocation.GEO.ACC_OFFSET_PTS_ALL'
 offsetPointsTempOutputLocation = testingTempOutputLocation
 offsetPointsOutputLocation = testingOutputLocation
 ####offsetPointsOutputLocation_NK = testingOutputLocation + "_NK"
+offsetTempPointsTestLayerFile = r'D:\SCHED\OffsetCrashes\Temp_OffsetOutputs_Test.lyr'
+offsetTempPointsProdLayerFile = r'D:\SCHED\OffsetCrashes\Temp_OffsetOutputs_Prod.lyr'
+offsetTempPointsLayerFile = offsetTempPointsTestLayerFile
 
 longitudeColumnName = 'ddLongitude'
 latitudeColumnName = 'ddLatitude'
+longLatColumnType = 'DOUBLE'
+
+blankDataFrameMXD = r'D:\SCHED\OffsetCrashes\blankDataFrameTemplate.mxd'
 
 # Pull all the crashes from the overall geocode. Once they're in the staging
 # table, compare them to previously offset results and choose up to 50k to attempt
@@ -250,11 +251,13 @@ def continuousiteratorprocess():
     ##print("Admin districts layer created.")
     #copyFeaturesAndCreateFeatureLayer(stagedNG911Roadways, inMemNG911Roadways, ng911RoadwaysLayer)
     #print("NG911 roadways layer created.")
-    copyFeaturesAndCreateFeatureLayer(stagedCrashPoints, inMemCrashPoints, inMemCrashPointsLayer)
+    # Use this to prevent the joining of fields onto stagedCrashPoints from persisting.
+    copyFeaturesAndCreateFeatureLayer(stagedCrashPoints, inMemCrashPoints, crashPointsLayer)
+    ##MakeFeatureLayer_management(stagedCrashPoints, crashPointsLayer)
     print("Crash points layer created.")
-    CopyFeatures_management(stagedNG911Roadways, inMemNG911Roadways)
-    print("inMemNG911Roadways created.")
-    CopyRows_management(stagedAliasTable, inMemAliasTable)
+    ##CopyFeatures_management(stagedNG911Roadways, inMemNG911Roadways)
+    ##print("inMemNG911Roadways created.")
+    ##CopyRows_management(stagedAliasTable, inMemAliasTable)
     ##CopyRows_management(stagedCrashRecords, inMemCrashRecords)
     
     # Need to reduce the potentially offsettable crash points here by comparing them to
@@ -304,7 +307,7 @@ def continuousiteratorprocess():
     # Looks like the script was indeed crashing because it was using too much memory.
     # Without copying the Crash Records to in_memory, the script is going further.
     
-    inMemCrashPointsKeyField = 'ACCIDENT_KEY'
+    crashPointsKeyField = 'ACCIDENT_KEY'
     joinTable = sortedInMemCrashRecords
     joinTableKeyField = 'ACCIDENT_KEY'
     # Add the CREATED_DATE and the offset fields. Then, make a field for and calculate the concatAccidentKey.
@@ -321,7 +324,7 @@ def continuousiteratorprocess():
     ####  20100104666YYYY04DD044716 is an example of the concatenated output generated, when the Y and D are capitalized.
     
     print("Joining the fields " + str(fieldsToJoinFromFCToFC) + " to the " + str(inMemCrashPoints) + " feature class.")
-    JoinField_management(inMemCrashPoints, inMemCrashPointsKeyField, joinTable, joinTableKeyField, fieldsToJoinFromFCToFC)
+    JoinField_management(inMemCrashPoints, crashPointsKeyField, joinTable, joinTableKeyField, fieldsToJoinFromFCToFC)
     
     FCDescription = Describe(inMemCrashPoints)
     FieldObjectsList = FCDescription.fields
@@ -333,7 +336,7 @@ def continuousiteratorprocess():
         # Convert the CREATED_DATE to a string of numbers.
         ConvertTimeField_management(inMemCrashPoints, joinedTimeFieldName, inputTimeFormatString, convertedTimeFieldName, outputTimeFieldType, outputTimeFormatString)
         # Calculate the unique key from the accident key and converted time field.
-        expressionText = "!" + str(inMemCrashPointsKeyField) + "! + !" + str(convertedTimeFieldName) + "!"
+        expressionText = "!" + str(crashPointsKeyField) + "! + !" + str(convertedTimeFieldName) + "!"
         CalculateField_management(inMemCrashPoints, accUniqueKeyFieldName, expressionText, "PYTHON_9.3")
         # After you calculate the concatenated unique key, delete the converted time field.
         #try:
@@ -394,25 +397,30 @@ def continuousiteratorprocess():
     
     # Select only the reduced number of features in the feature class
     # Build a dynamic selectionQuery and reselect the features in the feature class
-    createDynamicAttributeSelection(inMemCrashPointsLayer, uniqueKeyListReduced, accUniqueKeyFieldName, accUniqueKeyFieldType)
+    createDynamicAttributeSelection(crashPointsLayer, uniqueKeyListReduced, accUniqueKeyFieldName, accUniqueKeyFieldType)
     
     print("Copying the selected features from the larger inMemory feature class to a smaller subset feature class.")
-    CopyFeatures_management(inMemCrashPointsLayer, inMemCrashPointsSubset)
+    CopyFeatures_management(crashPointsLayer, inMemCrashPointsSubset)
     
-    Delete_management(inMemCrashPointsLayer)
-    Delete_management(inMemCrashPoints)
+    Delete_management(crashPointsLayer)
     
-    crashPointsDescription = Describe(stagedCrashPoints)
+    crashPointsDescription = Describe(inMemCrashPoints)
     crashPointsSR = crashPointsDescription.spatialReference
     del crashPointsDescription
     
+    Delete_management(inMemCrashPoints)
+    
+    print("The crashPointsSR is: " + str(crashPointsSR) + ".")
+    gc.collect()
+    print("The call to gc.collect() has completed.")
+    
     print("Starting the continuous offset caller.")
-    continuousoffsetcaller(inMemCrashPointsSubset, inMemNG911Roadways, inMemAliasTable, offsetPointsTempOutputLocation, useKDOTIntersect,
+    continuousoffsetcaller(inMemCrashPointsSubset, stagedNG911Roadways, stagedAliasTable, offsetPointsTempOutputLocation, useKDOTIntersect,
         crashPointsSR, roadwayTableGCID, aliasTableGCID, aliasTableNameFields, additionalNameColumnBaseName, concatAccidentKey) 
     
     createOutputLocationWithSR(offsetPointsOutputLocation, offsetProjectionToUse, offsetPointsTempOutputLocation)
-    moveCrashesFromTempToOutput(offsetPointsTempOutputLocation, offsetPointsOutputLocation)
-    calculateOutputLocationLongAndLat(offsetPointsOutputLocation, longitudeColumnName, latitudeColumnName)
+    moveCrashesFromTempToOutputWithLongAndLat(offsetPointsTempOutputLocation, offsetPointsOutputLocation, longitudeColumnName, latitudeColumnName)
+    ##calculateOutputLocationLongAndLat(offsetPointsOutputLocation, longitudeColumnName, latitudeColumnName)
 
 
 def createOutputLocationWithSR(offsetPoints, offsetProjection, offsetTempPoints):
@@ -428,22 +436,131 @@ def createOutputLocationWithSR(offsetPoints, offsetProjection, offsetTempPoints)
         print("The offsetPoints was created at" + str(offsetPoints) + ".")
 
 
-def moveCrashesFromTempToOutput(offsetTempPoints, offsetPoints):
-    # This needs to open a blank MXD, then set the dataframe to the offsetOutput projection
-    # and load the offsetTempPoints.
-    # Using the automatic reprojection capabilities of the data frame,
-    # it needs to export the offsetTempPoints to an in_memory/offsetTempPointsReproj
-    # then cursor the data from the in_memory/offsetTempPointsReproj to the
-    # offsetPoints since they should be in the same projection then.
-    offsetTempFields = ListFields(offsetTempPoints)
-    offsetTempFieldNames = [x.name for x in offsetTempFields]
+def moveCrashesFromTempToOutputWithLongAndLat(offsetTempPoints, offsetPoints, longColumn, latColumn):    
+    # This method doesn't work.
+    # Use Pyproj instead to generate new x/y using the existing x/y along with the old projection and the new projection.
+    
+    # get spatial reference from fc1
+    # get spatial reference from fc2
+    # convert the spatial references to well known text (wkt)
+    # use a searchCursor to get all of the offsetTempPoints
+    # convert the point locations from the old spatial reference to the new spatial reference
+    # using PyProj.
+    # Also add the values to each list/row for the new x/y as DOUBLE values for the decimal degrees.
+    # use an insertCursor to move the offsetTempPoints to the offsetPoints output. 
+    
+    # Check for the ddLat/ddLong fields in the output.
+    # Add them if they don't already exist.
+    
+    if Exists(offsetPoints):
+        offsetPointsOutputLocationFields = ListFields(offsetPoints)
+        offsetPointsOutputLocationFieldNames = [x.name for x in offsetPointsOutputLocationFieldNames]
+        # Check to see if the fields exist and add them if not.
+        if longitudeColumn in offsetPointsOutputLocationFieldNames:
+            print("longitudeColumn found. Will not re-add it.")
+        else:
+            AddField_management(outputWithOffsetLocations, longitudeColumn, longLatColumnType, 0, 0)
+            print("Added the longitudeColumn to the outputWithOffsetLocations FC with a type of " + str(longLatColumnType) + ".")
+        
+        if latitudeColumn in offsetPointsOutputLocationFieldNames:
+            print("latitudeColumn found. Will not re-add it.")
+        else:
+            AddField_management(outputWithOffsetLocations, latitudeColumn, longLatColumnType, 0, 0)
+            print("Added the latitudeColumn to the outputWithOffsetLocations FC with a type of " + str(longLatColumnType) + ".")
+        
+        # Instead of doing this, make a transfer set and transfer all of the data + the long/lat values to the new feature class
+        # from the temp feature class. -- Will need to include all of the matching fields except for the OID field for either
+        # one.
+        #Then
+        longLatUpdateFields = ['OID@', longitudeColumn, latitudeColumn, 'SHAPE@X', 'SHAPE@Y']
+        cursorClause = ''' ''' + str(longitudeColumn) + ''' IS NULL OR ''' + str(latitudeColumn) + ''' IS NULL '''
+        cursorSpatialReference = r"D:\SCHED\OffsetCrashes\NAD 1983 Decimal Degrees.prj"
+        newCursor = daUpdateCursor(offsetPoints, longLatUpdateFields, cursorClause, cursorSpatialReference)
+        
+        for cursorItem in newCursor:
+            cursorListItem = list(cursorItem)
+            cursorListItem[1] = cursorListItem[3]
+            cursorListItem[2] = cursorListItem[4]
+            newCursor.Update(cursorListItem)
+        try:
+            del newCursor
+        except:
+            pass
+        
+    else:
+        print("The offsetPoints FC does not exist. Will not add fields or calculate latitude/longitude values.")
+    
+    transferList = list()
+    newCursor = daSearchCursor(offsetTempPoints)
+    
+    for cursorItem in newCursor:
+        cursorListItem = list(cursorItem)
+        transferList.append(cursorListItem)
+    
+    try:
+        del newCursor
+    except:
+        pass
+    
+    newCursor = daInsertCursor(offsetPoints)
+    
+    try:
+        del newCursor
+    except:
+        pass
+    
+    mxdToUse = MapDocument(blankMXD)
+    
+    allDataFrames = ListDataFrames(blankMXD)
+    
+    dataFrameToUse = ''
+    try:
+        dataFrameToUse = allDataFrames[0]
+    except:
+        print("Could not assign the dataFrameToUse from the allDataFrames list.")
+    
+    spatialReferenceToAssign = SpatialReference(offsetProjectionToUse)
+    
+    dataFrameToUse.spatialReference = spatialReferenceToAssign
+    
+    AddLayer(dataFrameToUse, offsetTempPointsLayerFile)
+    
+    layersList = ListLayers(blankMXD, "", dataFrameToUse)
+    
+    offsetTempPointsLoadedLayer = layersList[0]
+    
+    if offsetTempPointsLoadedLayer is None:
+        print("The offsetTempPointsLoadedLayer does not exist.")
+    else:
+        pass
+    
+    offsetLoadedTempFields = ListFields(offsetTempPointsLoadedLayer)
+    offsetLoadedTempFieldNames = [x.name for x in offsetLoadedTempFields]
+    
+    # Have to use a step here to add and calculate the calculate the dd fields with the data frame's spatial reference.
+    # Check to see if the fields exist and add them if not.
+    if longitudeColumn not in offsetLoadedTempFieldNames:
+        AddField_management(offsetTempPointsLoadedLayer, longitudeColumn, "DOUBLE", 0, 0)
+    else:
+        pass
+    
+    if latitudeColumn not in offsetLoadedTempFieldNames:
+        AddField_management(offsetTempPointsLoadedLayer, latitudeColumn, "DOUBLE", 0, 0)
+    else:
+        pass
+    
+    # Calculate the fields with the spatial reference from the data frame instead
+    # of the spatial reference that they have...
+    
+    offsetTempFields = ListFields(offsetTempPointsLoadedLayer)
+    offsetTempFieldNames = [x.name for x in offsetTempPointsLoadedLayer]
     offsetOutputFields = ListFields(offsetPoints)
     offsetOutputFieldNames = [y.name for y in offsetOutputFields]
     transferFieldNames = [z for z in offsetTempFieldNames if z in offsetOutputFieldNames]
     
     transferList = list()
     
-    newCursor = daSearchCursor(offsetTempPoints, transferFieldNames)
+    newCursor = daSearchCursor(offsetTempPointsLoadedLayer, transferFieldNames)
     
     for cursorItem in newCursor:
         transferList.append(cursorItem)
@@ -456,13 +573,14 @@ def moveCrashesFromTempToOutput(offsetTempPoints, offsetPoints):
     newCursor = daInsertCursor(offsetPoints, transferFieldNames)
     
     for transferItem in transferList:
-        newCursor.Insert(transferList)
+        newCursor.Insert(transferItem)
     
     try:
         del newCursor
     except:
         pass
-
+    
+    pass
 
 # Call this after everything else to add the lat/long that Terri needs 
 # to insert the data back into KCARS.
