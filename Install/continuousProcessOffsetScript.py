@@ -17,12 +17,13 @@ import pyproj
 import random
 from arcpy import (AddField_management, CalculateField_management, ConvertTimeField_management,
     CopyFeatures_management, CopyRows_management, CreateFeatureclass_management, Delete_management,
-    DeleteField_management, Describe, env, Exists, GetCount_management, ListFeatureClasses,
+    DeleteField_management, Describe, env, Exists, GetCount_management, ListFeatureClasses, ListFields,
     JoinField_management, MakeFeatureLayer_management, SelectLayerByAttribute_management,
     SelectLayerByLocation_management, Sort_management, SpatialReference, TruncateTable_management)
-from arcpy.da import (SearchCursor as daSearchCursor)  # @UnresolvedImport
+from arcpy.da import (SearchCursor as daSearchCursor, InsertCursor as daInsertCursor, UpdateCursor as daUpdateCursor,
+    TableToNumPyArray, ExtendTable)
 from arcpy.mapping import (AddLayer, MapDocument, ListDataFrames, ListLayers)
-from AccidentDirectionMatrixOffsetCode import continuousoffsetcaller
+from AccidentDirectionMatrixOffsetCode import (continuousoffsetcaller, mainTest as accOffMainTest)
 # Doesn't seem like the daily vs overall property will need to be implemented.
 ##from lastRun import dailyOrOverall
 
@@ -36,7 +37,7 @@ from pathFunctions import (returnGDBOrSDEPath,
 # the AccidentDirectionMatrixOffsetCode script.
 env.overwriteOutput = True
 newSelection = "NEW_SELECTION"
-maxCrashPointsToProcess = 5000
+maxCrashPointsToProcess = 10000
 
 roadwayTableGCID = "NGKSSEGID"
 aliasTableGCID = "NGKSSEGID"
@@ -94,7 +95,6 @@ stagedCrashRecords = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\sg_CrashRec
 sortedInMemCrashRecords = r"in_memory/CrashRecordsSorted" # Fails now when used in anything with the value r"in_memory\SortedCrashRecords"
 concatAccidentKey = 'ACCIDENT_UNIQUE_KEY'
 
-
 testingTempOutputLocation = r'D:\SCHED\OffsetCrashes\crashOffsetTemp.gdb\Temp_OffsetOutputs'
 testingOutputLocation = r'D:\SCHED\OffsetCrashes\crashOffsetOutput.gdb\OffsetOutput'
 productionTempOutputLocation = r'D:\SCHED\OffsetCrashes\geo@CrashLocation.sde\CrashLocation.GEO.TEMP_ACC_OFFSET_PTS_ALL'
@@ -110,7 +110,10 @@ longitudeColumnName = 'ddLongitude'
 latitudeColumnName = 'ddLatitude'
 longLatColumnType = 'DOUBLE'
 
-blankDataFrameMXD = r'D:\SCHED\OffsetCrashes\blankDataFrameTemplate.mxd'
+isOffsetFieldName = 'isOffset'
+
+# Testing
+crashPointsTestOutput = r'D:\SCHED\OffsetCrashes\crashOffsetTemp.gdb\inMemCrashPointsTestOutput'
 
 # Pull all the crashes from the overall geocode. Once they're in the staging
 # table, compare them to previously offset results and choose up to 50k to attempt
@@ -149,10 +152,104 @@ blankDataFrameMXD = r'D:\SCHED\OffsetCrashes\blankDataFrameTemplate.mxd'
 # this process to access when it is running there against the CHASM
 # connection:
 # r'C:\GIS\Projections\NAD 1983 Decimal Degrees.prj'
+# ||||
+# vvvv
 # On AR60, the location is r'D:\SCHED\OffsetCrashes\NAD 1983 Decimal Degrees.prj'
 
 # Took 15 minutes to pull the roadways data across. :(
 # However, it appears to have succeeded. :D
+
+
+def moveCrashesFromTempToOutput(offsetTempPoints, offsetPoints, longColumn, latColumn, offsetProjection):
+    if Exists(offsetPoints):
+        offsetPointsOutputLocationFields = ListFields(offsetPoints)
+        offsetPointsOutputLocationFieldNames = [x.name for x in offsetPointsOutputLocationFields]
+        # Check to see if the fields exist and add them if not.
+        if longColumn in offsetPointsOutputLocationFieldNames:
+            print("longitudeColumn found. Will not re-add it.")
+        else:
+            AddField_management(outputWithOffsetLocations, longColumn, longLatColumnType, 0, 0)
+            print("Added the longitudeColumn to the outputWithOffsetLocations FC with a type of " + str(longLatColumnType) + ".")
+        
+        if latColumn in offsetPointsOutputLocationFieldNames:
+            print("latitudeColumn found. Will not re-add it.")
+        else:
+            AddField_management(outputWithOffsetLocations, latColumn, longLatColumnType, 0, 0)
+            print("Added the latitudeColumn to the outputWithOffsetLocations FC with a type of " + str(longLatColumnType) + ".")
+        
+    else:
+        print("The output offsetPoints FC, " + str(offsetPoints) + " does not exist. Will not add fields or transfer offset records.")
+    
+    offsetTempPointsDescription = Describe(offsetTempPoints)
+    offsetTempPointsFields = offsetTempPointsDescription.fields
+    offsetTempPointsOIDFieldName = offsetTempPointsDescription.OIDFieldName
+    offsetTempPointsShapeFieldName = offsetTempPointsDescription.shapeFieldName
+    offsetTempPointsFieldNames = [x.name for x in offsetTempPointsFields if x != offsetTempPointsOIDFieldName and x != offsetTempPointsShapeFieldName]
+    
+    offsetPointsDescription = Describe(offsetPoints)
+    offsetPointsFields = offsetPointsDescription.fields
+    offsetPointsOIDFieldName = offsetPointsDescription.OIDFieldName
+    offsetPointsShapeFieldName = offsetPointsDescription.shapeFieldName
+    offsetPointsFieldNames = [y.name for y in offsetPointsFields if y != offsetPointsOIDFieldName and y != offsetPointsShapeFieldName]
+    
+    transferFieldNames = [z for z in offsetTempPointsFieldNames if z in offsetPointsFieldNames]
+    transferFieldNames.append('SHAPE@')
+    
+    transferList = list()
+    searchCursorWhereClause = ''
+    offsetPointsSpatialReference = offsetPointsDescription.SpatialReference
+    newCursor = daSearchCursor(offsetTempPoints, transferFieldNames, searchCursorWhereClause, offsetPointsSpatialReference)
+    
+    for cursorItem in newCursor:
+        cursorListItem = list(cursorItem)
+        transferList.append(cursorListItem)
+    
+    try:
+        del newCursor
+    except:
+        pass
+    
+    newCursor = daInsertCursor(offsetPoints, transferFieldNames)
+    
+    for transferItem in transferList:
+        insertedOID = newCursor.insertRow(transferItem)
+        print("Inserted a row with the OID of : " + str(insertedOID) + ".")
+    
+    try:
+        del newCursor
+    except:
+        pass
+
+
+def updateTheddLongAndddLatFields(pointLayerToUpdate, isOffsetField, longitudeField, latitudeField):
+    print("Updating rows in the " + str(pointLayerToUpdate) + " FC.")
+    #testingSearchFields = [isOffsetField, longitudeField, latitudeField, "SHAPE@X", "SHAPE@Y"]
+    testingUpdateFields = [isOffsetField, "SHAPE@X", "SHAPE@Y", longitudeField, latitudeField]
+    
+    updateCursorClause = ''' ''' + str(isOffsetField) + ''' IS NOT NULL '''
+    #searchCursorClause = ''' 1 = 1 '''
+    # The X & Y Shape tokens should already be in the correct projection, so there is no need to
+    # further specify the output spatial reference.
+    newCursor = daUpdateCursor(pointLayerToUpdate, testingUpdateFields, updateCursorClause)
+    
+    for cursorItem in newCursor:
+        cursorListItem = list(cursorItem)
+        # Set the text fields to the string version of the Shape@X and Shape@Y tokens.
+        cursorListItem[3] = cursorListItem[1]
+        cursorListItem[4] = cursorListItem[2]
+        print("The transferItem has an isOffsetField of: " + str(cursorListItem[0]) + ".")
+        print("...and " + str(longitudeField) + "/" + str(latitudeField) + " of: " + str(cursorListItem[3]) + "/" + str(cursorListItem[4]) + ".\n")
+        newCursor.updateRow(cursorListItem)
+    
+    try:
+        del newCursor
+    except:
+        pass
+
+
+def continuousiteratorprocessDecimalDegreesTest():
+    moveCrashesFromTempToOutput(offsetPointsTempOutputLocation, offsetPointsOutputLocation, longitudeColumnName, latitudeColumnName, offsetProjectionToUse)
+    updateTheddLongAndddLatFields(offsetPointsOutputLocation, isOffsetFieldName, longitudeColumnName, latitudeColumnName)
 
 
 def pullDataFromChasm():
@@ -287,7 +384,7 @@ def continuousiteratorprocess():
     transferRows = list()
     for cursorItem in newCursor:
         transferRows.append(cursorItem)
-        
+    
     try:
         del newCursor
     except:
@@ -307,11 +404,17 @@ def continuousiteratorprocess():
     # Looks like the script was indeed crashing because it was using too much memory.
     # Without copying the Crash Records to in_memory, the script is going further.
     
+    
     crashPointsKeyField = 'ACCIDENT_KEY'
     joinTable = sortedInMemCrashRecords
     joinTableKeyField = 'ACCIDENT_KEY'
     # Add the CREATED_DATE and the offset fields. Then, make a field for and calculate the concatAccidentKey.
-    fieldsToJoinFromFCToFC = ['ON_ROAD_KDOT_NAME', 'AT_ROAD_KDOT_DIRECTION', 'AT_ROAD_KDOT_DIST_FEET', 'AT_ROAD_KDOT_NAME', 'CREATED_DATE']
+    existingEndpointFCFieldObjects = ListFields(inMemCrashPoints)
+    existingEndpointFCFieldNames = [x.name for x in existingEndpointFCFieldObjects]
+    uncheckedFieldsToJoinFromFCToFC = ['ON_ROAD_KDOT_NAME', 'AT_ROAD_KDOT_DIRECTION', 'AT_ROAD_KDOT_DIST_FEET', 'AT_ROAD_KDOT_NAME', 'CREATED_DATE']
+    fieldsToJoinFromFCToFC = [y for y in uncheckedFieldsToJoinFromFCToFC if y not in existingEndpointFCFieldNames]
+    fieldsToUseForJoining = [joinTableKeyField]
+    fieldsToUseForJoining += fieldsToJoinFromFCToFC
     accUniqueKeyFieldName = concatAccidentKey
     accUniqueKeyFieldLength = 25
     accUniqueKeyFieldType = 'Text'
@@ -323,8 +426,86 @@ def continuousiteratorprocess():
     outputTimeFormatString = 'yyyyMMddhhmmss' # the y/d used above are instead Y/D here. -- Help may be incorrect.
     ####  20100104666YYYY04DD044716 is an example of the concatenated output generated, when the Y and D are capitalized.
     
+    #Test this portion#
     print("Joining the fields " + str(fieldsToJoinFromFCToFC) + " to the " + str(inMemCrashPoints) + " feature class.")
-    JoinField_management(inMemCrashPoints, crashPointsKeyField, joinTable, joinTableKeyField, fieldsToJoinFromFCToFC)
+    #Use a dict that holds the info needed to add the fields.
+    #See if you can get it from the field objects, but get it in by hand otherwise.
+    joinTableFieldObjects = ListFields(joinTable)
+    
+    joinFieldsDict = dict()
+    
+    for fieldToJoinName in fieldsToJoinFromFCToFC:
+        for fieldObject in joinTableFieldObjects:
+            fieldObjectName = fieldObject.name
+            if (fieldToJoinName.lower() == fieldObjectName.lower()):
+                joinFieldsDict[fieldObject.name] = [fieldObject.type, fieldObject.precision, fieldObject.scale, fieldObject.length,
+                    fieldObject.aliasName, fieldObject.isNullable, fieldObject.required, fieldObject.domain]
+    
+    joinFieldsDictKeys = joinFieldsDict.keys()
+    
+    # Give defaults for those columns if they were not found for some reason.
+    if "ON_ROAD_KDOT_NAME" not in joinFieldsDictKeys:
+        joinFieldsDict["ON_ROAD_KDOT_NAME"] = ["TEXT", "", "", 50, "ON_ROAD_KDOT_NAME", "NULLABLE", "", ""]
+    if "AT_ROAD_KDOT_DIRECTION" not in joinFieldsDictKeys:
+        joinFieldsDict["AT_ROAD_KDOT_DIRECTION"] = ["TEXT", "", "", 2, "AT_ROAD_KDOT_DIRECTION", "NULLABLE", "", ""]
+    if "AT_ROAD_KDOT_DIST_FEET" not in joinFieldsDictKeys:
+        joinFieldsDict["AT_ROAD_KDOT_DIST_FEET"] = ["DOUBLE", "", "", "", "AT_ROAD_KDOT_DIST_FEET", "NULLABLE", "", ""]
+    if "AT_ROAD_KDOT_NAME" not in joinFieldsDictKeys:
+        joinFieldsDict["AT_ROAD_KDOT_NAME"] = ["TEXT", "", "", 50, "AT_ROAD_KDOT_NAME", "NULLABLE", "", ""]
+    if "AT_ROAD_KDOT_NAME" not in joinFieldsDictKeys:
+        joinFieldsDict["AT_ROAD_KDOT_NAME"] = ["TEXT", "", "", 50, "AT_ROAD_KDOT_NAME", "NULLABLE", "", ""]
+    if "CREATED_DATE" not in joinFieldsDictKeys:
+        joinFieldsDict["CREATED_DATE"] = ["DATE", "", "", "", "CREATED_DATE", "NULLABLE", "", ""]
+    
+    print("Adding the fields " + str(fieldsToJoinFromFCToFC) + " to the " + str(inMemCrashPoints) + " feature class.")
+    for joinFieldKey in joinFieldsDict.keys():
+        AddField_management(inMemCrashPoints, joinFieldKey, joinFieldsDict[joinFieldKey][0], joinFieldsDict[joinFieldKey][1],
+            joinFieldsDict[joinFieldKey][2], joinFieldsDict[joinFieldKey][3], joinFieldsDict[joinFieldKey][4], joinFieldsDict[joinFieldKey][5],
+            joinFieldsDict[joinFieldKey][6], joinFieldsDict[joinFieldKey][7])
+    
+    newCursor = daSearchCursor(joinTable, fieldsToUseForJoining)
+    
+    # New dict to hold the data in the columns that were added earlier and specified for use in the search cursor.
+    transferDataDict = dict()
+    
+    for cursorRow in newCursor:
+        fieldsDataList = transferDataDict.get(cursorRow[0], None)
+        if fieldsDataList is None:
+            fieldsDataList = list()
+        else:
+            pass
+        fieldsDataList.append(cursorRow)
+        transferDataDict[cursorRow[0]] = fieldsDataList
+    
+    try:
+        del newCursor
+    except:
+        pass
+    
+    print("Updating the fields " + str(fieldsToJoinFromFCToFC) + " in the " + str(inMemCrashPoints) + " feature class.")
+    newCursor = daUpdateCursor(inMemCrashPoints, fieldsToUseForJoining)
+    
+    for cursorRow in newCursor:
+        cursorListItem = list(cursorRow)
+        matchingContainerItem = transferDataDict.get(cursorListItem[0], None)
+        # The fieldsDataList from the joinFieldsDict should always be a list with at least one list inside of it.
+        # If there is more than one list, we still just want the first one since the list is already sorted.
+        if matchingContainerItem is not None:
+            #print("The matchingContainerItem is: " + str(matchingContainerItem) + ".") # print for debugging
+            matchingListItem = matchingContainerItem[0]
+            if matchingListItem is not None:
+                #print("The matchingListItem is: " + str(matchingListItem) + ".") # print for debugging
+                matchingListLen = len(matchingListItem)
+                cursorFieldsLen = len(fieldsToUseForJoining)
+                if matchingListLen == cursorFieldsLen:
+                    newCursor.updateRow(matchingListItem)
+                else:
+                    continue # go on to the next row without updating anything
+            else:
+                continue # go on to the next row without updating anything
+        else:
+            continue # go on to the next row without updating anything
+    
     
     FCDescription = Describe(inMemCrashPoints)
     FieldObjectsList = FCDescription.fields
@@ -348,12 +529,8 @@ def continuousiteratorprocess():
         print("Great news! The " + str(accUniqueKeyFieldName) + " field already exists.")
         print("It does not need to be added and have its values calculated.")
     
-    # After you calculate the concatenated unique key, delete the converted time field.
-    print("Deleting the field " + str(convertedTimeFieldName) + " from the FC: " + str(inMemCrashPoints) + ".")
-    DeleteField_management(inMemCrashPoints, convertedTimeFieldName)
-    
     inputKeySearchFields = [accUniqueKeyFieldName]
-    inputKeySearchQuery = """ """ + str(accUniqueKeyFieldName) + """ IS NOT NULL """
+    inputKeySearchQuery = """ """ + str(accUniqueKeyFieldName) + """ IS NOT NULL AND """ + str(convertedTimeFieldName) + """ IS NOT NULL """
     newCursor = daSearchCursor(inMemCrashPoints, inputKeySearchFields, inputKeySearchQuery)
     
     crashPointsSelectionList = []
@@ -365,9 +542,12 @@ def continuousiteratorprocess():
     except:
         pass
     
+    # After you calculate the concatenated unique key, delete the converted time field.
+    print("Deleting the field " + str(convertedTimeFieldName) + " from the FC: " + str(inMemCrashPoints) + ".")
+    DeleteField_management(inMemCrashPoints, convertedTimeFieldName)
     
     if (Exists(offsetPointsOutputLocation)):
-        print("Removing unique keys from the selection list if they already exist in the output.")
+        print("Removing rows with unique keys from the selection list where those unique keys already exist in the output.")
         
         outputKeySearchFields = [accUniqueKeyFieldName]
         outputKeySearchQuery = """ """ + str(accUniqueKeyFieldName) + """ IS NOT NULL """
@@ -395,9 +575,10 @@ def continuousiteratorprocess():
     
     uniqueKeyListReduced = random.sample(crashPointsSelectionList, maxCrashPointsToProcess)
     
+    #### Commented out for testing.
     # Select only the reduced number of features in the feature class
     # Build a dynamic selectionQuery and reselect the features in the feature class
-    createDynamicAttributeSelection(crashPointsLayer, uniqueKeyListReduced, accUniqueKeyFieldName, accUniqueKeyFieldType)
+    ####createDynamicAttributeSelection(crashPointsLayer, uniqueKeyListReduced, accUniqueKeyFieldName, accUniqueKeyFieldType)
     
     print("Copying the selected features from the larger inMemory feature class to a smaller subset feature class.")
     CopyFeatures_management(crashPointsLayer, inMemCrashPointsSubset)
@@ -408,8 +589,20 @@ def continuousiteratorprocess():
     crashPointsSR = crashPointsDescription.spatialReference
     del crashPointsDescription
     
-    Delete_management(inMemCrashPoints)
+    # Adding test output to confirm that things are working correctly.
+    if Exists(crashPointsTestOutput):
+        try:
+            Delete_management(crashPointsTestOutput)
+        except:
+            pass
+    else:
+        pass
     
+    CopyFeatures_management(inMemCrashPoints, crashPointsTestOutput)
+    time.sleep(10)
+    raise ValueError("Check to see if the fields have been correctly added and updated.") # End of Test
+    
+    Delete_management(inMemCrashPoints)
     print("The crashPointsSR is: " + str(crashPointsSR) + ".")
     gc.collect()
     print("The call to gc.collect() has completed.")
@@ -419,8 +612,8 @@ def continuousiteratorprocess():
         crashPointsSR, roadwayTableGCID, aliasTableGCID, aliasTableNameFields, additionalNameColumnBaseName, concatAccidentKey) 
     
     createOutputLocationWithSR(offsetPointsOutputLocation, offsetProjectionToUse, offsetPointsTempOutputLocation)
-    moveCrashesFromTempToOutputWithLongAndLat(offsetPointsTempOutputLocation, offsetPointsOutputLocation, longitudeColumnName, latitudeColumnName)
-    ##calculateOutputLocationLongAndLat(offsetPointsOutputLocation, longitudeColumnName, latitudeColumnName)
+    moveCrashesFromTempToOutput(offsetPointsTempOutputLocation, offsetPointsOutputLocation, longitudeColumnName, latitudeColumnName, offsetProjectionToUse)
+    updateTheddLongAndddLatFields(offsetPointsOutputLocation, isOffsetFieldName, longitudeColumnName, latitudeColumnName)
 
 
 def createOutputLocationWithSR(offsetPoints, offsetProjection, offsetTempPoints):
@@ -435,7 +628,7 @@ def createOutputLocationWithSR(offsetPoints, offsetProjection, offsetTempPoints)
         # Another function will add missing fields, if any.
         print("The offsetPoints was created at" + str(offsetPoints) + ".")
 
-
+"""
 def moveCrashesFromTempToOutputWithLongAndLat(offsetTempPoints, offsetPoints, longColumn, latColumn):    
     # This method doesn't work.
     # Use Pyproj instead to generate new x/y using the existing x/y along with the old projection and the new projection.
@@ -581,6 +774,7 @@ def moveCrashesFromTempToOutputWithLongAndLat(offsetTempPoints, offsetPoints, lo
         pass
     
     pass
+"""
 
 # Call this after everything else to add the lat/long that Terri needs 
 # to insert the data back into KCARS.
@@ -588,6 +782,9 @@ def moveCrashesFromTempToOutputWithLongAndLat(offsetTempPoints, offsetPoints, lo
 ## to the output prj, then export the temp feature class to a reprojected temp feature class
 ## and cursor the output from that reprojected feature class into the prod feature class
 ## prior to calling this function.
+
+### Don't need to do the above, just open a SearchCursor and pass in the dd Projection as the
+### spatial reference.
 def calculateOutputLocationLongAndLat(offsetPoints, longitudeColumn, latitudeColumn):
     # This needs to create the x&y columns if the don't exist, then update them with correct Lat/Long in Decimal Degrees.
     if Exists(offsetPoints):
@@ -627,7 +824,7 @@ def calculateOutputLocationLongAndLat(offsetPoints, longitudeColumn, latitudeCol
 def createDynamicAttributeSelection(featureClassToSelect, attributeValuesList, attributeColumnName, attributeColumnType):
     # build the selection list & select up to but not more than 999 features at at time
     selectionCounter = 0
-    if attributeColumnType.lower() in ('text', 'date', 'guid'): # Use quotes around each value
+    if attributeColumnType.lower() in ('text', 'date', 'guid'): # Use single quotes around each selection value
         featureClassSelectionClause = """ """ + str(attributeColumnName) + """ IN ("""
         
         # Clear the selection to start fresh
@@ -640,7 +837,7 @@ def createDynamicAttributeSelection(featureClassToSelect, attributeValuesList, a
                 # Remove the trailing ", " and add a closing parenthesis.
                 featureClassSelectionClause = featureClassSelectionClause[:-2] + """) """
                 #Debug only
-                print("featureClassSelectionClause " + str(featureClassSelectionClause))
+                #print("featureClassSelectionClause " + str(featureClassSelectionClause))
                 SelectLayerByAttribute_management(featureClassToSelect, "ADD_TO_SELECTION", featureClassSelectionClause)
                 
                 selectionCounter = 0
@@ -650,12 +847,12 @@ def createDynamicAttributeSelection(featureClassToSelect, attributeValuesList, a
         if selectionCounter > 0:
             # Remove the trailing ", " and add a closing parenthesis.
             #Debug only
-            print("featureClassSelectionClause " + str(featureClassSelectionClause))
+            #print("featureClassSelectionClause " + str(featureClassSelectionClause))
             featureClassSelectionClause = featureClassSelectionClause[:-2] + """) """
             SelectLayerByAttribute_management(featureClassToSelect, "ADD_TO_SELECTION", featureClassSelectionClause)
         else:
             pass
-    else: # Don't use quotes around each value
+    else: # Don't use quotes around each selection value
         featureClassSelectionClause = """ """ + str(attributeColumnName) + """ IN ("""
         
         # Clear the selection to start fresh
@@ -668,7 +865,7 @@ def createDynamicAttributeSelection(featureClassToSelect, attributeValuesList, a
                 # Remove the trailing ", " and add a closing parenthesis.
                 featureClassSelectionClause = featureClassSelectionClause[:-2] + """) """
                 #Debug only
-                print("featureClassSelectionClause " + str(featureClassSelectionClause))
+                #print("featureClassSelectionClause " + str(featureClassSelectionClause))
                 SelectLayerByAttribute_management(featureClassToSelect, "ADD_TO_SELECTION", featureClassSelectionClause)
                 
                 selectionCounter = 0
@@ -678,7 +875,7 @@ def createDynamicAttributeSelection(featureClassToSelect, attributeValuesList, a
         if selectionCounter > 0:
             # Remove the trailing ", " and add a closing parenthesis.
             #Debug only
-            print("featureClassSelectionClause " + str(featureClassSelectionClause))
+            #print("featureClassSelectionClause " + str(featureClassSelectionClause))
             featureClassSelectionClause = featureClassSelectionClause[:-2] + """) """
             SelectLayerByAttribute_management(featureClassToSelect, "ADD_TO_SELECTION", featureClassSelectionClause)
         else:
@@ -703,6 +900,8 @@ def createDynamicAttributeSelection(featureClassToSelect, attributeValuesList, a
 def main():
     #pullDataFromChasm() # Skipping for now due to the long time that it takes.
     continuousiteratorprocess()
+    #accOffMainTest()
+    #continuousiteratorprocessDecimalDegreesTest()
 
 
 if __name__ == "__main__":

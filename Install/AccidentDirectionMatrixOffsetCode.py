@@ -43,6 +43,10 @@ intermediateAccidentIntersectSinglePart = r'in_memory\intermediateAccidentInters
 
 roadsAsFeatureLayer = 'NonStateRoadsFeatureLayer'
 
+#Set the unique key field for use when removing duplicates.
+currentUniqueKeyField = 'ACCIDENT_KEY' # Default
+isOffsetFieldName = 'isOffset'
+
 
 def UpdateOptionsWithParameters(optionsObject):
     try:
@@ -236,7 +240,6 @@ def OffsetDirectionMatrix2(offsetOptions):
     AddXY_management(geocodedLocXY)
     
     
-    
     # Check if the KDOT_ROUTENAME field was already added to the roads table.
     # If not, add it.
     # Then update the field using the best route name alias.
@@ -286,15 +289,13 @@ def OffsetDirectionMatrix2(offsetOptions):
     except:
         pass
     
-    #Testing to see if it helps the cursors keep working.
+    #Testing to see if it helps the cursors keep working. Update: Seems useful, keep it in.
     gc.collect()
     
     # Replacement function for having the code inline here
     # since I needed to be able to specify more options.
     singlePartOffsetCrashesList = buildSinglePartOffsetFeaturesFromGeocodedCrashes(offsetOptions, geocodedAccidentsList, whereClauseFlag, fromContinuous, descSpatialReference)
     
-    #Set the unique key field for use when removing duplicates.
-    currentUniqueKeyField = 'ACCIDENT_KEY' # Default
     if offsetOptions.offsetPointsUniqueKey is None:
         pass
     else:
@@ -343,7 +344,7 @@ def removeDuplicatesFromSinglePartFeatures(offsetOptions, singlePartFeauresList,
         except:
             pass
     
-    accidentUpdateCursorFields = [uniqueKeyField, 'Shape@XY', 'isOffset']
+    accidentUpdateCursorFields = [uniqueKeyField, 'Shape@XY', isOffsetFieldName]
     
     # To speed this up, implement a dictionary that will allow lookup
     # of the cursorItem[0] in the updateList instead of doing
@@ -399,40 +400,66 @@ def removeDuplicatesFromSinglePartFeatures(offsetOptions, singlePartFeauresList,
     # Add an "isOffset" value of 'ZeroDistanceOffset' that is used when the the offset
     # distance is less than 5 ft or if the distance is null which allows
     # the crash to be considered to be correctly offset at the intersection.
-    lowDistanceOrNullIsOffset(offsetOptions, uniqueKeyField)
+    lowDistanceOrNullOffset(offsetOptions, uniqueKeyField)
 
 
-def lowDistanceOrNullIsOffset(offsetOptions, uniqueKeyField):
+def lowDistanceOrNullOffset(offsetOptions, uniqueKeyField):
     print("Adding ZeroDistanceOffsets to the offsetOptions.accidentDataWithOffsetOutput FC.")
     try:
         accidentDataToUpdate = offsetOptions.accidentDataWithOffsetOutput
         
-        zeroDistanceOffset = "ZeroDistanceOffset"
+        zeroDistanceOffset = 'ZeroDistanceOffset'
         
-        accidentUpdateCursorFields = [None]
+        accidentUpdateCursorFields = [None, None, None, None]
+        
+        updateOID = Describe(accidentDataToUpdate).OIDFieldName
+        """
+        if offsetOptions.useKDOTFields == True:
+            accidentUpdateCursorFields = [uniqueKeyField, offsetOptions.KDOTXYFieldList[7], isOffsetFieldName]
+        else:
+            accidentUpdateCursorFields = [uniqueKeyField, offsetOptions.NonKDOTXYFieldList[7], isOffsetFieldName]
         
         if offsetOptions.useKDOTFields == True:
-            accidentUpdateCursorFields = [uniqueKeyField, offsetOptions.KDOTXYFieldList[7], 'isOffset']
+            accidentUpdateCursorFields = [updateOID, offsetOptions.KDOTXYFieldList[7], isOffsetFieldName]
         else:
-            accidentUpdateCursorFields = [uniqueKeyField, offsetOptions.NonKDOTXYFieldList[7], 'isOffset']
+            accidentUpdateCursorFields = [updateOID, offsetOptions.NonKDOTXYFieldList[7], isOffsetFieldName]
+        """
         
-        accidentUpdateCursor = UpdateCursor(accidentDataToUpdate, accidentUpdateCursorFields)
+        if offsetOptions.useKDOTFields == True:
+            updateCheckDistField = offsetOptions.KDOTXYFieldList[7]
+        else:
+            updateCheckDistField = offsetOptions.NonKDOTXYFieldList[7]
+        
+        accidentUpdateCursorFields = ['SHAPE@X', 'SHAPE@Y', isOffsetFieldName]
+        
+        updateWhereClause = str(updateCheckDistField) + ''' IS NULL OR ''' + str(updateCheckDistField) + ''' < 5 '''
+        
+        accidentUpdateCursor = UpdateCursor(accidentDataToUpdate, accidentUpdateCursorFields, updateWhereClause)
         for cursorItem in accidentUpdateCursor:
             try:
-                if cursorItem[1] is None:
+                print("The offset distance is None or less than 5. Marking it as a zero distance offset")
+                editableCursorItem = list(cursorItem)
+                editableCursorItem[2] = zeroDistanceOffset
+                accidentUpdateCursor.updateRow(editableCursorItem)
+                """
+                if cursorOffsetDistance is None:
                     print("The offset distance is None. Marking it as a zero distance offset")
                     editableCursorItem = list(cursorItem)
                     editableCursorItem[2] = zeroDistanceOffset
                     accidentUpdateCursor.updateRow(editableCursorItem)
-                elif int(str(cursorItem[1])) < 5:
+                elif cursorOffsetDistance < 5:
                     print("cursorItem[1] is less than 5. Marking it as a zero distance offset.")
                     editableCursorItem = list(cursorItem)
                     editableCursorItem[2] = zeroDistanceOffset
                     accidentUpdateCursor.updateRow(editableCursorItem)
                 else:
-                    pass
+                    print("cursorItem[1] is " + str(cursorItem[1]) + ".")
+                """
             except:
-                print("Something went wrong in the lowDistanceOrNullIsOffset update cursor.")
+                print("Something went wrong in the lowDistanceOrNullOffset update cursor. Print1.")
+                print("The row is: " + str(cursorItem) + ".")
+                print("The modified row is: " + str(editableCursorItem) + ".")
+                print(traceback.format_exc())
         
         try:
             del accidentUpdateCursor
@@ -440,7 +467,8 @@ def lowDistanceOrNullIsOffset(offsetOptions, uniqueKeyField):
             print("Could not delete the accidentUpdateCursor.")
         
     except:
-        print("Something went wrong in the lowDistanceOrNullIsOffset function.")
+        print("Something went wrong in the lowDistanceOrNullOffset function. Print2.")
+        print(traceback.format_exc())
 
 
 def SetupOutputFeatureClass(outputFeatureClassOptions):
@@ -452,8 +480,8 @@ def SetupOutputFeatureClass(outputFeatureClassOptions):
     geocodedFeaturesAsALayer = 'geocodedLayer'
     outputWithOffsetLocations = outputFeatureClassOptions.accidentDataWithOffsetOutput
     
-    fieldNameToAdd = "isOffset"
-    fieldLength = 25
+    fieldNameToAdd = isOffsetFieldName
+    fieldLength = 50
     
     outputGDB = returnGDBOrSDEPath(outputWithOffsetLocations)
     #outputTableName = (os.path.split(outputWithOffsetLocations))[-1]
@@ -1119,7 +1147,7 @@ def generateWhereClause(listOfColumnNames, listOfPotentialValues):
     return generatedWhereClause
 
 
-if __name__ == "__main__":
+def main():
     # See the top of the script for optionsInstance attributes.
     optionsInstance = InitalizeCurrentPathSettings()
     optionsInstance = UpdateOptionsWithParameters(optionsInstance)
@@ -1128,6 +1156,24 @@ if __name__ == "__main__":
     print 'Starting the offset process...'
     OffsetDirectionMatrix2(optionsInstance)
     #print 'The accident offset process is complete.'
+
+
+def mainTest():
+    # See the top of the script for optionsInstance attributes.
+    optionsInstance = InitalizeCurrentPathSettings()
+    optionsInstance = UpdateOptionsWithParameters(optionsInstance)
+    
+    #SetupOutputFeatureClass(optionsInstance)
+    #print 'Starting the offset process...'
+    #OffsetDirectionMatrix2(optionsInstance)
+    print 'Testing the lowDistanceOrNullOffset process.'
+    lowDistanceOrNullOffset(optionsInstance, currentUniqueKeyField)
+    #print 'The accident offset process is complete.'
+
+
+if __name__ == "__main__":
+    main()
+    #mainTest()
     
 else:
     pass
