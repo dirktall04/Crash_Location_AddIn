@@ -50,13 +50,12 @@ roadsAsFeatureLayer = 'NonStateRoadsFeatureLayer'
 currentUniqueKeyField = 'ACCIDENT_KEY' # Default
 isOffsetFieldName = 'isOffset'
 
-CONST_VALID_OFFSET_DIRECTIONS = ["N", "E", "S", "W", "NE", "SE", "SW", "NW"]
+VALID_OFFSET_DIRECTIONS_CONST = ["N", "E", "S", "W", "NE", "SE", "SW", "NW"]
 maximumDegreesDifference = 65
 CONST_ZERO_DISTANCE_OFFSET = 'ZeroDistanceOffset'
 CONST_NORMAL_OFFSET = 'NormalOffset'
 CONST_NOT_OFFSET = 'NotOffset'
-# Turn off to speed up processing. Turn back in if there is an error.
-debugOutputValue = False
+
 
 '''
 currentCrashObject.unformattedCrashItemRow
@@ -75,7 +74,7 @@ currentCrashObject.offsetShapeXY
 '''
 
 
-def singlerowoffsetcaller(inputCrashObject, processedRoadwayLayer, outputIncrementValue, inputSpatialReference, useParseMatchAddr):
+def singlerowoffsetcaller(inputCrashObject, processedRoadwayLayer, outputIncrementValue, inputSpatialReference):
     inputCrashObject.isOffset = None
     inputCrashObject = lowOrZeroDistanceOffsetCheck(inputCrashObject)
     inputCrashObject = invalidDirectionOffsetCheck(inputCrashObject)
@@ -87,7 +86,7 @@ def singlerowoffsetcaller(inputCrashObject, processedRoadwayLayer, outputIncreme
         else:
             pass
     else:
-        inputCrashObject = bufferCrashLocationAndIntersectWithRoads(inputCrashObject, processedRoadwayLayer, outputIncrementValue, inputSpatialReference, useParseMatchAddr)
+        inputCrashObject = bufferCrashLocationAndIntersectWithRoads(inputCrashObject, processedRoadwayLayer, outputIncrementValue, inputSpatialReference)
         inputCrashObject = chooseTheBestPointFromSinglePartPointsList(inputCrashObject)
         ##Just use offsetShapeX and offsetShapeY for now since the FC knows that it's dealing with points.
         #offsetTempPoint = Point(inputCrashObject.offsetShapeX, inputCrashObject.offsetShapeY) # Point without a projection. Does this actually help
@@ -114,16 +113,16 @@ def invalidDirectionOffsetCheck(crashObject):
     else:
         offsetDirectionToTest = offsetDirectionToTest.upper()
     
-    if offsetDirectionToTest not in CONST_VALID_OFFSET_DIRECTIONS:
+    if offsetDirectionToTest not in VALID_OFFSET_DIRECTIONS_CONST:
         crashObject.isOffset = CONST_ZERO_DISTANCE_OFFSET
-        print("The offsetDirection was not in: " + str(CONST_VALID_OFFSET_DIRECTIONS) + ".")
+        print("The offsetDirection was not in: " + str(VALID_OFFSET_DIRECTIONS_CONST) + ".")
     else:
         pass
     
     return crashObject
 
 
-def bufferCrashLocationAndIntersectWithRoads(crashObject, roadsLayer, outputIncrementInt, bufferAndIntersectSR, useParseMatchAddr):
+def bufferCrashLocationAndIntersectWithRoads(crashObject, roadsLayer, outputIncrementInt, bufferAndIntersectSR):
     #pointToBufferXY = list(crashObject.initialShapeXY)
     #print("The crashObject.initialShapeXY is " + str(crashObject.initialShapeXY) + " and the pointToBufferXY is " + str(pointToBufferXY) + ".")
     ##pointToBufferWithoutGeometry = Point(pointToBufferXY)
@@ -149,38 +148,31 @@ def bufferCrashLocationAndIntersectWithRoads(crashObject, roadsLayer, outputIncr
             offsetDistanceString = str(offsetDistance) + " Feet"
             Buffer_analysis(pointToBuffer, intermediateAccidentBuffer, offsetDistanceString, "", "", "", "", "PLANAR")
             
-            if debugOutputValue == True:
-                # Save the buffer here. Call it bufferOutput_001 to start with, and increment from there. Get the number
-                # from the calling script.
-                bufferOutputLocation = bufferOutputLocationBase + "_" + str(outputIncrementInt).zfill(4)
-                copyFCToTempLocation(intermediateAccidentBuffer, bufferOutputLocation)
-            else:
-                pass
+            # Save the buffer here. Call it bufferOutput_001 to start with, and increment from there. Get the number
+            # from the calling script.
+            bufferOutputLocation = bufferOutputLocationBase + "_" + str(outputIncrementInt).zfill(4)
+            copyFCToTempLocation(intermediateAccidentBuffer, bufferOutputLocation)
             
             firstRoadName = str(crashObject.onRoad)
             firstRoadName = firstRoadName.upper()
+            ###secondRoadName = str(geocodedAccident[8])
+            ###secondRoadName = secondRoadName.upper()
             
-            roadNameValues = [firstRoadName]
-            
-            if useParseMatchAddr == True:
-                parsedRoadNamesList = ParseMatchAddr(crashObject.matchAddress)
-                secondRoadName = " "
-                try:
-                    secondRoadName = parsedRoadNamesList[0]
-                    secondRoadName = secondRoadName.upper()
-                except:
-                    pass
-                thirdRoadName = " "
-                try:
-                    thirdRoadName = parsedRoadNamesList[1]
-                    thirdRoadName = thirdRoadName.upper()
-                except:
-                    pass
-                
-                roadNameValues = [firstRoadName, secondRoadName, thirdRoadName]
-            else:
+            parsedRoadNamesList = ParseMatchAddr(crashObject.matchAddress)
+            secondRoadName = " "
+            try:
+                secondRoadName = parsedRoadNamesList[0]
+                secondRoadName = secondRoadName.upper()
+            except:
+                pass
+            thirdRoadName = " "
+            try:
+                thirdRoadName = parsedRoadNamesList[1]
+                thirdRoadName = thirdRoadName.upper()
+            except:
                 pass
             
+            roadNameValues = [firstRoadName, secondRoadName, thirdRoadName]  
             streetWhereClause = generateWhereClause(roadNameColumns, roadNameValues)
             print("The generated whereClause is: " + str(streetWhereClause) + ".")
             SelectLayerByAttribute_management(roadsLayer, "NEW_SELECTION", streetWhereClause)
@@ -211,13 +203,10 @@ def bufferCrashLocationAndIntersectWithRoads(crashObject, roadsLayer, outputIncr
                 else:
                     pass
                 
-                if debugOutputValue == True:
-                    # Save the intersect FC here. Call it intersectOutput_001 to start with, and increment from there. Get the number
-                    # from the calling script.
-                    intersectOutputLocation = intersectOutputLocationBase + "_" + str(outputIncrementInt).zfill(4)
-                    copyFCToTempLocation(intermediateAccidentIntersect, intersectOutputLocation)
-                else:
-                    pass
+                # Save the intersect FC here. Call it intersectOutput_001 to start with, and increment from there. Get the number
+                # from the calling script.
+                intersectOutputLocation = intersectOutputLocationBase + "_" + str(outputIncrementInt).zfill(4)
+                copyFCToTempLocation(intermediateAccidentIntersect, intersectOutputLocation)
                 
                 # GetCount_management is not particularly Pythonic.
                 countResult = GetCount_management(intermediateAccidentIntersect)
@@ -366,6 +355,27 @@ def selectBestOffsetPoint(crashObject, inputAngle, maxDifference):
             thisDirMin = min(thisDirValue_Iter)
             print("the dirMin for this list is : " + str(thisDirMin) + ".")
             
+            # The commented code should be unnecessary. Unless the rest of this function is broken.
+            # If the rest of this function is broken it is STILL unnecessary.
+            '''
+            if bestOffsetPointTuple[0] == None and bestOffsetPointTuple[1] == None:
+                # To make sure that single points returned by the intersect are offset.
+                # Should already happen, but keep it in for now anyways.
+                bestOffsetPointTuple = point2Tuple 
+            else:
+                pass
+            
+            # I also think that this code is unnecessary. You're already calculating the thisDirMin
+            # which should be the only thing that the value of bestDirMin can change to.
+            if bestDirValue is not None:
+                bestDirTestOne = abs(inputAngle - bestDirValue)
+                bestDirTestTwo = abs(abs(inputAngle - bestDirValue) - 360)              
+                bestDirValue_Iter = [bestDirTestOne, bestDirTestTwo]
+                bestDirMin = min(bestDirValue_Iter)
+            else:
+                bestDirMin = 500
+            '''
+            
             if  thisDirMin <= bestDirMin:
                 print("This is the best point2Tuple so far: " + str(point2Tuple) + ".")
                 print("It is paired with this point1Tuple: " + str(point1Tuple) + ".")
@@ -508,6 +518,7 @@ def copyFCToTempLocation(inputFC, outputFC):
         CopyFeatures_management(inputFC, outputFC)
     except:
         print("Could not copy the feature class at: " + str(inputFC) + " to the output location at: " + str(outputFC) + ".")
+    
 
 
 def generateWhereClause(listOfColumnNames, listOfPotentialValues):
@@ -527,13 +538,40 @@ def generateWhereClause(listOfColumnNames, listOfPotentialValues):
 
 
 def main():
-    print("This scipt is not meant to be ran on its own.")
-    print("Please call the singlerowoffsetcaller from another script.")
+    # Should be the new main id for the crash intersect process
+    # that takes a single row at a time and returns the
+    # result in a single pass.
+    # Main function might not make so much sense for that, except
+    # to have as a testing function with dummy data to test
+    # upon and make sure that things work correctly.
     pass
+    
+    
+def mainOld():
+    # See the top of the script for optionsInstance attributes.
+    optionsInstance = InitalizeCurrentPathSettings()
+    
+    SetupOutputFeatureClass(optionsInstance)
+    print 'Starting the offset process...'
+    OffsetDirectionMatrix2(optionsInstance)
+    #print 'The accident offset process is complete.'
+
+
+def mainTest():
+    # See the top of the script for optionsInstance attributes.
+    optionsInstance = InitalizeCurrentPathSettings()
+    
+    #SetupOutputFeatureClass(optionsInstance)
+    #print 'Starting the offset process...'
+    #OffsetDirectionMatrix2(optionsInstance)
+    print 'Testing the lowDistanceOrNullOffset process.'
+    lowDistanceOrNullOffset(optionsInstance, currentUniqueKeyField)
+    #print 'The accident offset process is complete.'
 
 
 if __name__ == "__main__":
     main()
+    #mainTest()
     
 else:
     pass

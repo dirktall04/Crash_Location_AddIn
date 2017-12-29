@@ -5,7 +5,6 @@
 # AccidentDirectionMatrixOffsetCode.py
 # Updated by dirktall04 on 2017-09-27
 # Updated by dirktall04 on 2017-10-24
-# Updated by dirktall04 on 2017-12-27
 
 # Rebuild the accident offset script to use a fixed source of Roadway data (NG911).
 # 2017-09-27 update removed several in_memory\* feature classes in an attempt
@@ -16,7 +15,6 @@
 import gc
 import os
 import random
-import re
 import datetime
 import traceback
 from arcpy import (AddField_management, CalculateField_management, ConvertTimeField_management,
@@ -27,8 +25,10 @@ from arcpy import (AddField_management, CalculateField_management, ConvertTimeFi
     SpatialReference, TruncateTable_management)
 from arcpy.da import (Editor, SearchCursor as daSearchCursor, InsertCursor as daInsertCursor, UpdateCursor as daUpdateCursor)
 from arcpy.mapping import (AddLayer, MapDocument, ListDataFrames, ListLayers)
-from crashOffsetSingleRow import (singlerowoffsetcaller, CONST_ZERO_DISTANCE_OFFSET, CONST_NORMAL_OFFSET,
-	CONST_NOT_OFFSET)
+from crashOffsetSingleRow import (singlerowoffsetcaller, mainTest as accOffMainTest, CONST_ZERO_DISTANCE_OFFSET,
+    CONST_NORMAL_OFFSET, CONST_NOT_OFFSET)
+# Doesn't seem like the daily vs overall property will need to be implemented.
+##from lastRun import dailyOrOverall
 
 from pathFunctions import (returnGDBOrSDEPath, returnFeatureClass, returnGDBOrSDEName)
 try:
@@ -36,32 +36,121 @@ try:
 except:
     print ("Could not import the tableOntoTableCaller or GenerateFlatTableColumnNames function from flattenTableJoinOntoTable.py.")
 
-from continuousProcess_config import (crashPointsToProcessPerRun, roadwayTableGCID, aliasTableGCID,
-aliasTableNameFields, additionalRdNameColumnBaseName, gdbForStaging, inProcessPRJ, offsetOutputPRJ,
-chasmNG911Roadways, pulledNG911Roadways, stagedNG911Roadways, projectedNG911Roadways, 
-chasmAliasTable, pulledAliasTable, stagedAliasTable, chasmOutputCrashPoints, pulledCrashPoints, 
-stagedCrashPoints, projectedCrashPoints, inMemCrashPoints, crashPointsLayer, inMemCrashPointsSubset, 
-useKDOTIntersect, allKDOTCrashRecords, pulledCrashRecords, stagedCrashRecords, sortedInMemCrashRecords, 
-concatAccidentKey, testingTempOutputLocation, testingOutputLocation, productionTempOutputLocation, 
-productionOutputLocation, offsetPointsTempOutputLocation, offsetPointsOutputLocation, longitudeColumnName, 
-latitudeColumnName, longLatColumnType, isOffsetFieldName, offsetDateFieldName, offsetDateColumnType, 
-intermediateAccidentBuffer, intermediateAccidentIntersect, intermediateAccidentIntersectSinglePart, 
-roadsAsFeatureLayer, currentUniqueKeyField, flattenedRoadwayTableForReference, flattenedRoadwayTableLayer, 
-testFlattenedRoadwayTableOutput, crashPointsTestOutput, reapplyRoadAliasFlattening, KDOTRoadNameCalcField, 
-addAndCalculateTheKDOTAlias, parseMatchAddresses, stopAfterKDOTRouteNameUpdate)
-
-#print("Could not import variables from the continousProcess_config.py script.")
-
-
 # I've phased out most of the feature classes and tables that were written to in_memory.
 # The script seemed to be having trouble with all the space that they were taking up.
 # Also added some calls to gc.collect() in this script and
 # the AccidentDirectionMatrixOffsetCode script.
 env.overwriteOutput = True
+newSelection = "NEW_SELECTION"
+maxCrashPointsToProcess = 100 # Modified downwards for faster iteration during testing.
+
+roadwayTableGCID = "NGKSSEGID"
+aliasTableGCID = "NGKSSEGID"
+aliasTableNameFields = ["A_RD", "LABEL"]
+additionalRdNameColumnBaseName = "Alias_Road_Name_"
+# Since I'm not super confident in the CHASM connection, there will 
+# need to be a  location that I use for staging data that comes across.
+# In fact I may need to pull data across in chunks so that it doesn't time out.
+# Once all the data is across, it will be compared to the previous dataset.
+# If the number of features is at least 75% of the previous number, the
+# features will be used in the process. If not, they'll be ignored and
+# the previous features will be used. There should be a max
+# time limit on this, however it is not yet implemented.
+
+gdbForStaging = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb'
+inProcessPRJ = r'D:\SCHED\OffsetCrashes\NAD 1983 StatePlane Kansas North FIPS 1501 (US Feet).prj'
 inProcessProjectionToUse = SpatialReference(inProcessPRJ)
 env.outputCoordinateSystem = inProcessProjectionToUse
+offsetOutputPRJ = r'D:\SCHED\OffsetCrashes\NAD 1983 Decimal Degrees.prj'
 offsetOutputProjectionToUse = SpatialReference(offsetOutputPRJ)
-newSelection = "NEW_SELECTION"
+
+chasmNG911Roadways = r'D:\CHASM\CHASM.sde\KDOT.ROADCENTERLINE_NG911'
+pulledNG911Roadways = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\pu_NG911Roadways'
+stagedNG911Roadways = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\sg_NG911Roadways'
+projectedNG911Roadways = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\proj_NG911Roadways'
+##inMemNG911Roadways = r"in_memory\NG911Roadways"
+##ng911RoadwaysLayer = 'ng911RoadwaysAsALayer' # Might not be needed.
+##inMemRoadwaysSubset = r'in_memory\NG911RoadwaysSubset'
+
+chasmAliasTable = r'D:\CHASM\CHASM.sde\KDOT.ROADALIAS_NG911'
+pulledAliasTable = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\pu_AliasTable'
+stagedAliasTable = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\sg_AliasTable'
+##inMemAliasTable = r'in_memory\AliasTable'
+
+# Since the logic for the pulled & staged tables doesn't apply to the Daily
+# geocode, the only crashes that will be pulled & staged will be from the Overall.
+# However, I will need to include the data from the original crash record
+# since the number of columns in the output is greatly reduced from the
+# original crash record source.
+chasmOutputCrashPoints = r'D:\CHASM\CHASM.sde\KDOT.KGS_CRASH_OUTPUT'
+pulledCrashPoints = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\pu_CrashPoints'
+stagedCrashPoints = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\sg_CrashPoints'
+projectedCrashPoints = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\proj_CrashPoints'
+projectedCrashPointsTestingSet = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\proj_CrashPoints100'
+inMemCrashPoints = r'in_memory\CrashPoints'
+crashPointsLayer = 'CrashPointsLayer'
+inMemCrashPointsSubset = r'in_memory\CrashPointsSubset'
+##inMemCrashPointsSubsetLayer = 'inMemCrashPointsSubsetLayer'
+##inMemCrashPointsReducedSubset = r'in_memory\CrashPointsReducedSubset'
+#inMemCrashPointsReducedSubsetLayer = 'inMemCrashPointsReducedSubsetLayer'
+
+useKDOTIntersect = 'True'
+
+# Add the accident records as well since they have the information needed for offsetting
+# and also needed to make the selection for which accidents have already been offset
+# and which ones still need to be offset.
+allKDOTCrashRecords = r'D:\SCHED\OffsetCrashes\readonly@kcarsprd.sde\KCARS.GIS_GEOCODE_ACC_V' # Local accident data source.
+pulledCrashRecords = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\pu_CrashRecords'
+stagedCrashRecords = r'D:\SCHED\OffsetCrashes\crashOffsetStaging.gdb\sg_CrashRecords'
+###inMemCrashRecords = r'in_memory\CrashRecords'
+# sortedInMemCrashRecords fails now when used in anything with the value r"in_memory\SortedCrashRecords"
+# changed it, but it still failed, not when ran as a script, but when ran in ArcMap.
+# So, I changed it again, this time to something that exists in an FGDB on disk rather than being something
+# which exists in the in_memory database. So many limitations on using that construct. :-(
+sortedInMemCrashRecords = r'D:\SCHED\OffsetCrashes\crashOffsetSorted.gdb\CrashRecordsSorted'
+concatAccidentKey = 'ACCIDENT_UNIQUE_KEY'
+
+testingTempOutputLocation = r'D:\SCHED\OffsetCrashes\crashOffsetTemp.gdb\Temp_OffsetOutput'
+testingOutputLocation = r'D:\SCHED\OffsetCrashes\crashOffsetOutput.gdb\OffsetOutput'
+productionTempOutputLocation = r'D:\SCHED\OffsetCrashes\geo@CrashLocation.sde\CrashLocation.GEO.TEMP_ACC_OFFSET_PTS_ALL'
+productionOutputLocation = r'D:\SCHED\OffsetCrashes\geo@CrashLocation.sde\CrashLocation.GEO.ACC_OFFSET_PTS_ALL'
+offsetPointsTempOutputLocation = testingTempOutputLocation
+offsetPointsOutputLocation = testingOutputLocation
+####offsetPointsOutputLocation_NK = testingOutputLocation + "_NK"
+offsetTempPointsTestLayerFile = r'D:\SCHED\OffsetCrashes\Temp_OffsetOutputs_Test.lyr'
+offsetTempPointsProdLayerFile = r'D:\SCHED\OffsetCrashes\Temp_OffsetOutputs_Prod.lyr'
+offsetTempPointsLayerFile = offsetTempPointsTestLayerFile
+
+longitudeColumnName = 'ddLongitude'
+latitudeColumnName = 'ddLatitude'
+longLatColumnType = 'DOUBLE'
+
+isOffsetFieldName = 'isOffset'
+offsetDateFieldName = 'OFFSET_DATE'
+offsetDateColumnType = 'DATE'
+
+#######################################
+# --- From crash offset functions --- #
+#######################################
+# Scratch data locations
+intermediateAccidentBuffer = r'in_memory\intermediateAccidentBuffer'
+intermediateAccidentIntersect = r'in_memory\intermediateAccidentIntersect'
+intermediateAccidentIntersectSinglePart = r'in_memory\intermediateAccidentIntersectSinglePart'
+
+roadsAsFeatureLayer = 'NonStateRoadsFeatureLayer'
+
+#Set the unique key field for use when removing duplicates.
+currentUniqueKeyField = 'ACCIDENT_KEY' # Default
+flattenedRoadwayTableForReference = r'in_memory\flattenedRoadwayTable'
+flattenedRoadwayTableLayer = 'flattenedRoadwayTableLayer'
+testFlattenedRoadwayTableOutput = r'D:\SCHED\OffsetCrashes\crashOffsetTemp.gdb\flattenedRoadwayTable'
+
+# Testing
+crashPointsTestOutput = r'D:\SCHED\OffsetCrashes\crashOffsetTemp.gdb\inMemCrashPointsTestOutput'
+crashPointsSubsetTestOutput = r'D:\SCHED\OffsetCrashes\crashOffsetTemp.gdb\inMemCrashPointsSubsetTestOutput'
+
+# For faster testing, set this to False. If the road centerlines have been updated, set it to True.
+reapplyRoadAliasFlattening = False
 
 # Pull all the crashes from the overall geocode. Once they're in the staging
 # table, compare them to previously offset results and choose up to 50k to attempt
@@ -347,8 +436,9 @@ def copyFeaturesAndCreateFeatureLayer(fcFirstLocation, fcSecondLocation, fcFeatu
     MakeFeatureLayer_management(fcSecondLocation, fcFeatureLayerName)
 
 
-def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
-    print("Starting the continuous iterator process.")
+def continuousiteratorprocessbysinglerow():
+    print("Starting the continous iterator process.")
+    # In order to quickly work with the features, they need to be moved to in_memory.
     # In order to select features, they need to be feature layers.
     currentDateTime = datetime.datetime.now()
     formattedDateTime = currentDateTime.strftime("%m/%d/%Y %I:%M:%S")
@@ -359,7 +449,7 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
     #                                           'AT_ROAD_KDOT_DIRECTION', 'AT_ROAD_KDOT_DIST_FEET', 'AT_ROAD_KDOT_NAME',
     #                                           'Match_addr']
     
-    copyFeaturesAndCreateFeatureLayer(projectedCrashPoints, inMemCrashPoints, crashPointsLayer)
+    copyFeaturesAndCreateFeatureLayer(projectedCrashPointsTestingSet, inMemCrashPoints, crashPointsLayer)
     print("Crash points layer created.")
     
     sortFieldsAndOrders = [['CREATED_DATE', 'DESCENDING']]
@@ -385,7 +475,7 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
     outputTimeFieldType = 'Text'
     outputTimeFormatString = 'yyyyMMddhhmmss' # the y/d used above are instead Y/D here. -- Help may be incorrect.
     ####  Modified due to bad result when using capital Y/D. Help is wrong. See below.
-    ####  20100104666YYYY04DD044716 is an example of the concatenated output generated when the Y and D are capitalized.
+    ####  20100104666YYYY04DD044716 is an example of the concatenated output generated, when the Y and D are capitalized.
     
     #Test this portion#
     print("Joining the fields " + str(fieldsToJoinFromFCToFC) + " to the " + str(inMemCrashPoints) + " feature class.")
@@ -546,12 +636,6 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
         print("Therefore, there are no unique keys to remove from the selection list.")
     
     # Create a random sample of the remaining values in the crashPointsSelectionList.
-    crashPointsSelectionListLength = len(crashPointsSelectionList)
-    
-    if crashPointsSelectionListLength < maxCrashPointsToProcess:
-        maxCrashPointsToProcess = crashPointsSelectionListLength
-    else:
-        pass
     
     uniqueKeyListReduced = random.sample(crashPointsSelectionList, maxCrashPointsToProcess)
     
@@ -573,6 +657,7 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
     ### when trying to insert the results of an intersection into a new feature class.
     ### There, all of the features that are being intersected as well as the
     ### feature class being inserted into should all share a projection.
+    
     
     
     # Adding test output to confirm that things are working correctly.
@@ -604,72 +689,22 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
     
     if reapplyRoadAliasFlattening == True:
         flattenedRoadwayTable = flattenedRoadwayTableForReference
-        tableOntoTableCaller(projectedNG911Roadways, roadwayTableGCID, stagedAliasTable,
+        additionalColumnCount = tableOntoTableCaller(projectedNG911Roadways, roadwayTableGCID, stagedAliasTable,
             aliasTableGCID, aliasTableNameFields, flattenedRoadwayTable, additionalRdNameColumnBaseName)
         
         CopyFeatures_management(flattenedRoadwayTable, testFlattenedRoadwayTableOutput)        
         
+        roadNameColumns = ["RD", "LABEL", "STP_RD"] # The flattened alias column names get appended to these.
+        roadAliasNameColumns = GenerateFlatTableColumnNames(additionalRdNameColumnBaseName, additionalColumnCount)
+        roadNameColumns += roadAliasNameColumns
+        
+        ##Debug output
+        print("The additionalColumnCount = " + str(additionalColumnCount) + ".")
+        print("The full set of roadAliasNameColumns = " + str(roadAliasNameColumns) + ".")
+        print("The full set of roadNameColumns = " + str(roadNameColumns) + ".")
+    
     else:
         flattenedRoadwayTable = testFlattenedRoadwayTableOutput
-    
-    additionalColumnCount = countTheNumberOfAliasFieldNames(flattenedRoadwayTable, additionalRdNameColumnBaseName)
-    roadAliasNameColumns = []
-    
-    roadNameColumns = ["RD", "LABEL", "STP_RD"] # The flattened alias column names get appended to these.
-    if additionalColumnCount is not None and additionalColumnCount >= 1:
-        roadAliasNameColumns = GenerateFlatTableColumnNames(additionalRdNameColumnBaseName, additionalColumnCount)
-        if len(roadAliasNameColumns) > 0:
-            roadNameColumns += roadAliasNameColumns
-        else:
-            pass
-    else:
-        pass
-    
-    # Try to get the accuracy in calculating the KDOT format alias up. Some of these have aliases that are
-    # US HWY 56, US56, HWY 56, etc, but not U056, which is what is needed.
-    roadNameColumnsToCalcKDOTAlias = roadNameColumns
-    
-    if addAndCalculateTheKDOTAlias == True:
-        # Check to see whether or not the column exists in the flattenedRoadWayTable
-        # If not, then add it.
-        # If so, then go onto the next step.
-        # Calculate the fields based on passing the RD field, or
-        # if null, and the Label Field is not null, then use the
-        # Label field instead.
-        # Use the 
-        addKDOTAliasNameField(flattenedRoadwayTable, KDOTRoadNameCalcField)
-        KDOTRouteNameUpdate(flattenedRoadwayTable, KDOTRoadNameCalcField, roadNameColumnsToCalcKDOTAlias)
-    else:
-        pass
-    
-    # Check to see if the KDOTRoadNameCalcField exists in the flattenedRoadwayTable.
-    # If so, add it to the list of roadNameColumns
-    flattenedRoadwayTableFieldObjects = ListFields(flattenedRoadwayTable)
-    flattenedRoadwayTableFieldNames = [x.name for x in flattenedRoadwayTableFieldObjects]
-    if KDOTRoadNameCalcField in flattenedRoadwayTableFieldNames:
-        print("Found the " + str(KDOTRoadNameCalcField) + " field in the flattenedRoadwayTableFieldNames.")
-        if KDOTRoadNameCalcField not in roadNameColumns:
-            print("Adding the " + str(KDOTRoadNameCalcField) + " field to the flattenedRoadwayTableFieldNames.")
-            roadNameColumns.append(KDOTRoadNameCalcField)
-        else:
-            print("The " + str(KDOTRoadNameCalcField) + " was already in the roadNameColumns, so it will not be added again.")
-    else:
-        print("Did not find the " + str(KDOTRoadNameCalcField) + " field in the flattenedRoadwayTableFieldNames: " + str(flattenedRoadwayTableFieldNames) + ".")
-        print("It will not be added to the roadNameColumns: " + str(roadNameColumns) + ".")
-    
-    ##Debug output
-    print("The additionalColumnCount is : " + str(additionalColumnCount) + ".")
-    if len(roadAliasNameColumns) > 0:
-        print("The full set of roadAliasNameColumns = " + str(roadAliasNameColumns) + ".")
-    else:
-        pass
-    print("The full set of roadNameColumns = " + str(roadNameColumns) + ".")
-    
-    if stopAfterKDOTRouteNameUpdate == True:
-        raise IOError("Check the " + str(KDOTRoadNameCalcField) + " values and see if they populated correctly.")
-    else:
-        pass
-    
     
     # Turn the result into a feature layer so that it can be used in selections.
     MakeFeatureLayer_management(flattenedRoadwayTable, flattenedRoadwayTableLayer)
@@ -680,16 +715,13 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
     crashPointsSubsetFields = crashPointsSubsetDescription.fields
     crashPointsSubsetOIDFieldName = crashPointsSubsetDescription.OIDFieldName
     crashPointsSubsetShapeFieldName = crashPointsSubsetDescription.shapeFieldName
-    excludedOIDAndShapeFieldNames = [crashPointsSubsetOIDFieldName, crashPointsSubsetShapeFieldName]
-    allCrashPointsSubsetFieldNames = [x.name for x in crashPointsSubsetFields]
+    allCrashPointsSubsetFieldNames = [x.name for x in crashPointsSubsetFields if x != crashPointsSubsetOIDFieldName and x != crashPointsSubsetShapeFieldName]
     orderedFieldNamesForOffsetProcessing = ['SHAPE@', 'SHAPE@XY', 'ON_ROAD_KDOT_NAME', 'AT_ROAD_KDOT_DIRECTION',
                                             'AT_ROAD_KDOT_DIST_FEET', 'MATCH_ADDR', concatAccidentKey]
-    notAlreadyUsedCrashPointsSubsetFieldNames = [y for y in allCrashPointsSubsetFieldNames if (y not in orderedFieldNamesForOffsetProcessing and y not in excludedOIDAndShapeFieldNames)]
+    notAlreadyUsedCrashPointsSubsetFieldNames = [y for y in allCrashPointsSubsetFieldNames if y not in orderedFieldNamesForOffsetProcessing]
     # The complete list of fields for each row which is to be passed through the entire process.
     searchCursorFieldNamesForCrashPointsSubset = orderedFieldNamesForOffsetProcessing + notAlreadyUsedCrashPointsSubsetFieldNames
     
-    print("The value for the excludedOIDAndShapeFieldNames is : " + str(excludedOIDAndShapeFieldNames) + ".")
-    print("The OID Field is: " + str(crashPointsSubsetOIDFieldName) + " and the Shape Field is: " + str(crashPointsSubsetShapeFieldName) + ".")
     print("The full set of searchCursorFieldNamesForCrashPointsSubset are: " + str(searchCursorFieldNamesForCrashPointsSubset) + ".")
     
     newCursor = daSearchCursor(inMemCrashPointsSubset, searchCursorFieldNamesForCrashPointsSubset)
@@ -734,7 +766,7 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
     
     counterValue = 0
     for readyToOffsetCrashObject in readyToOffsetCrashObjectsList:
-        returnedCrashOffsetObject = singlerowoffsetcaller(readyToOffsetCrashObject, flattenedRoadwayTableLayer, counterValue, inProcessProjectionToUse, parseMatchAddresses)
+        returnedCrashOffsetObject = singlerowoffsetcaller(readyToOffsetCrashObject, flattenedRoadwayTableLayer, counterValue, inProcessProjectionToUse)
         counterValue += 1
         # May need to format the data a bit here before appending it.
         if returnedCrashOffsetObject is not None:
@@ -774,7 +806,7 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
                 formattedCrashItemList = returnedCrashOffsetObject.unformattedCrashItemList
                 #del formattedCrashItemList[2] # Remove initial SHAPE@Y value
                 #del formattedCrashItemList[1] # Remove initial SHAPE@X value
-                del formattedCrashItemList[1] # Remove initial SHAPE@XY value, in the 2nd list location, but keep the initial shape, in the first location.
+                del formattedCrashItemList[1] # Remove initial SHAPE@XY value, in the 2nd list location.
                 formattedCrashItemList.append(returnedCrashOffsetObject.isOffset)
                 formattedOffsetCrashItemsList.append(formattedCrashItemList)
             else:
@@ -800,7 +832,7 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
             ##print("The length of the tempOutputInsertFields is: " + str(len(tempOutputInsertFields)) + ".")
             print("The x & y of the readyToInsertRow's geometry are: " + str(readyToInsertRow[0].firstPoint.X) + " " + str(readyToInsertRow[0].firstPoint.Y) + ".")
             print("The uniqueKey and offsetDistance are: " + str(readyToInsertRow[5]) + " and " + str(readyToInsertRow[3]) + ".")
-            #print("The full value of the readyToInsertRow is: " +str(readyToInsertRow) + ".")
+            print("The full value of the readyToInsertRow is: " +str(readyToInsertRow) + ".")
             # Insert this into the tempOutput location.
             newCursor.insertRow(readyToInsertRow)
         else:
@@ -816,11 +848,10 @@ def continuousiteratorprocessbysinglerow(maxCrashPointsToProcess):
     # For instance, if the data could not be offset, do you want to write that to the output dataset with
     # the understanding that it will be reran at some point if it receives an update after the offsetDate?
     # That decision will be a part of this script.
-    # ^Decision is yes. ^^Modification is complete.
     
-    createOutputLocationWithSR(offsetPointsOutputLocation, offsetOutputProjectionToUse, offsetPointsTempOutputLocation)
-    moveCrashesFromTempToOutput(offsetPointsTempOutputLocation, offsetPointsOutputLocation, longitudeColumnName, latitudeColumnName, offsetDateFieldName)
-    updateTheddLongAndddLatFields(offsetPointsOutputLocation, isOffsetFieldName, longitudeColumnName, latitudeColumnName)
+    #createOutputLocationWithSR(offsetPointsOutputLocation, offsetOutputProjectionToUse, offsetPointsTempOutputLocation)
+    #moveCrashesFromTempToOutput(offsetPointsTempOutputLocation, offsetPointsOutputLocation, longitudeColumnName, latitudeColumnName, offsetDateFieldName)
+    #updateTheddLongAndddLatFields(offsetPointsOutputLocation, isOffsetFieldName, longitudeColumnName, latitudeColumnName)
 
 
 def createOutputLocationWithSR(offsetPoints, offsetProjection, offsetTempPoints):
@@ -834,162 +865,6 @@ def createOutputLocationWithSR(offsetPoints, offsetProjection, offsetTempPoints)
         # Another function will add missing fields, if any.
         print("The offsetPoints FC was created at" + str(offsetPoints) + ".")
 
-
-def countTheNumberOfAliasFieldNames(fcWithAliasFieldNames, aliasFieldNamesBase):
-    fieldObjectsList = ListFields(fcWithAliasFieldNames)
-    fieldNamesList = [x.name for x in fieldObjectsList]
-    aliasFieldNamesCount = 0
-    for fieldNameItem in fieldNamesList:
-        if fieldNameItem.find(aliasFieldNamesBase) >= 0:
-            aliasFieldNamesCount += 1
-        else:
-            pass
-    
-    return aliasFieldNamesCount
-
-
-def addKDOTAliasNameField(centerlinesToUpdate, KDOTAliasName):
-    fieldsList = ListFields(centerlinesToUpdate)
-    
-    fieldNamesList = list()
-    
-    # Iterate through the list of fields
-    for field in fieldsList:
-        fieldNamesList.append(field.name)
-    
-    # If the KDOT_ROUTENAME field is not found,
-    # add it with adequate parameters.
-    if KDOTAliasName not in fieldNamesList:
-        print("Adding " + str(KDOTAliasName) + " to " + str(centerlinesToUpdate) + ".")
-        previousWorkspace = env.workspace  # @UndefinedVariable
-        addFieldWorkspace = returnGDBOrSDEPath(centerlinesToUpdate)
-        env.workspace = addFieldWorkspace
-        
-        fieldLength = 10
-        
-        AddField_management(centerlinesToUpdate, KDOTAliasName, "TEXT", "", "", fieldLength)
-        
-        env.workspace = previousWorkspace
-        print("The " + str(KDOTAliasName) + " field was added to " + str(centerlinesToUpdate) + ".")
-    
-    else:
-        print("The " + str(KDOTAliasName) + " field already exists within " + str(centerlinesToUpdate) + ".")
-        print("It will not be added again, but its values will be updated (where necessary).")
-
-
-#Adapted from the Kdot_RouteNameCalc function in the NGfLRSMethod script.
-def KDOTRouteNameUpdate(centerlinesToUpdate, KDOTAliasName, inputRDNameFieldsList):
-    aliasNameFieldInAList = [KDOTAliasName]
-    inputRDNameFieldsListUpdated = [x for x in inputRDNameFieldsList if x not in aliasNameFieldInAList]
-    
-    cursorFields = aliasNameFieldInAList + inputRDNameFieldsListUpdated
-    
-    # Matches an I, U, or K at the start of the string, ignoring case.
-    IUKMatchString = re.compile(r'^[IUK]', re.IGNORECASE)
-    
-    # Matches 1 to 3 digits at the end of a string, probably no reason to ignore case in the check.
-    singleToTripleNumberEndMatchString = re.compile(r'[0-9][0-9][0-9]|[0-9][0-9]|[0-9]')     
-    
-    cursorFieldsLen = len(cursorFields)
-    newCursor = daUpdateCursor(centerlinesToUpdate, cursorFields)
-    for cursorItem in newCursor:
-        cursorListItem = list(cursorItem)
-        inputRDNamesValueList = []
-        outputRDNamesValueList = []
-        firstPart = ""
-        secondPart = ""
-        fullRouteName = ""
-        if cursorFieldsLen > 1:
-            for rangeValue in xrange(0, (cursorFieldsLen - 1)):
-                inputRDNamesValueList.append(cursorItem[rangeValue])
-            
-            for inputRDNamesValue in inputRDNamesValueList:
-                if inputRDNamesValue is not None and inputRDNamesValue != "":
-                    testResult0 = None
-                    testResult1 = None
-                    
-                    ####################################################################################
-                    
-                    testResult0 = re.search(IUKMatchString, inputRDNamesValue)
-                    testResult1 = re.search(singleToTripleNumberEndMatchString, inputRDNamesValue)    
-                    
-                    if testResult0 is not None and testResult1 is not None:
-                        firstPart = str(testResult0.group(0))
-                        secondPart = str(testResult1.group(0))
-                        
-                        # Pad the string with prepended zeroes if it is not 3 digits long already.
-                        if len(secondPart) == 2:
-                            secondPart = secondPart.zfill(3)
-                            #print "secondPart = " + secondPart
-                        elif len(secondPart) == 1:
-                            secondPart = secondPart.zfill(3)
-                            #print "secondPart = " + secondPart
-                        else:
-                            pass
-                        
-                        fullRouteName = firstPart + secondPart
-                    else:
-                        pass
-                    
-                    outputRDNamesValueList.append(fullRouteName)
-                else:
-                    pass
-        
-            outputRDNameItem = selectBestNameBasedOnRouteHierarcy(outputRDNamesValueList)
-            if outputRDNameItem is not None and outputRDNameItem != '':
-                if len(outputRDNameItem) >= 4:
-                    
-                    print("Updating the " + str(KDOTAliasName) + " field with a value of: " + str(outputRDNameItem) + ".")
-                    cursorListItem[0] = outputRDNameItem
-                    newCursor.updateRow(cursorListItem)
-            else:
-                pass
-            
-        else:
-            pass
-        
-    try:
-        del newCursor
-    except:
-        pass
-
-
-def selectBestNameBasedOnRouteHierarcy(listOfKDOTNames):
-    bestNameItem = ''
-    for KDOTNameItem in listOfKDOTNames:
-        if bestNameItem == '':
-            bestNameItem = KDOTNameItem
-        else:
-            if bestNameItem is not None and str(bestNameItem)[0].upper() == 'I':
-                if KDOTNameItem is not None and str(KDOTNameItem)[0].upper() == 'I':
-                    if int(str(KDOTNameItem)[1:]) < int(str(bestNameItem)[1:]):
-                        bestNameItem = KDOTNameItem
-                    else:
-                        pass
-            
-            elif bestNameItem is not None and str(bestNameItem)[0].upper() == 'U':
-                if KDOTNameItem is not None and str(KDOTNameItem)[0].upper() == 'I':
-                    bestNameItem = KDOTNameItem
-                elif KDOTNameItem is not None and str(KDOTNameItem)[0].upper() == 'U':
-                    if int(str(KDOTNameItem)[1:]) < int(str(bestNameItem)[1:]):
-                        bestNameItem = KDOTNameItem
-                    else:
-                        pass
-            
-            elif bestNameItem is not None and str(bestNameItem)[0].upper() == 'K':
-                if KDOTNameItem is not None and str(KDOTNameItem)[0].upper() == 'I':
-                    bestNameItem = KDOTNameItem
-                elif KDOTNameItem is not None and str(KDOTNameItem)[0].upper() == 'U':
-                    bestNameItem = KDOTNameItem
-                elif KDOTNameItem is not None and str(KDOTNameItem)[0].upper() == 'K':
-                    if int(str(KDOTNameItem)[1:]) < int(str(bestNameItem)[1:]):
-                        bestNameItem = KDOTNameItem
-                    else:
-                        pass
-            else:
-                pass # No change to the bestNameItem.
-    
-    return bestNameItem
 
 ### Don't need to do anything fancy with loaded layers, just open
 ### a SearchCursor and pass in the dd Projection as the spatial reference.
@@ -1109,29 +984,9 @@ def createDynamicAttributeSelection(featureClassToSelect, attributeValuesList, a
 # Should also give information on how many points have
 # been successfully offset from those geocoded points.
 def main():
-    startingTime = datetime.datetime.now()
-    print("Starting at " + str(startingTime) + ".")
-    pullDataFromChasm() # Skipping for now due to the long time that it takes.
-    continuousiteratorprocessbysinglerow(crashPointsToProcessPerRun)
+    #pullDataFromChasm() # Skipping for now due to the long time that it takes.
+    continuousiteratorprocessbysinglerow()
     #accOffMainTest()
-    endingTime = datetime.datetime.now()
-    elapsedTime = FindDuration(endingTime, startingTime)
-    print("The script began at " + str(startingTime) + " and completed at " + str(endingTime) + ",")
-    print("taking a total of: " + str(elapsedTime) + ".")
-
-
-def FindDuration(endTime, startTime):
-    #Takes two datetime.datetime objects, subtracting the 2nd from the first
-    #to find the duration between the two.
-    duration = endTime - startTime
-    
-    dSeconds = int(duration.seconds)
-    durationp1 = str(int(dSeconds // 3600)).zfill(2)
-    durationp2 = str(int((dSeconds % 3600) // 60)).zfill(2)
-    durationp3 = str(int(dSeconds % 60)).zfill(2)
-    durationString = durationp1 + ':' +  durationp2 + ':' + durationp3
-    
-    return durationString
 
 
 if __name__ == "__main__":
